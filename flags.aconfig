@@ -1,0 +1,9 @@
+package: "android.memory.guardian.flags"
+container: "system"
+
+flag {
+  name: "memory_guardian_enabled"
+  namespace: "system_performance"
+  description: "This flag controls whether Process Memory Guardian Daemon is enabled"
+  bug: "434681786"
+}

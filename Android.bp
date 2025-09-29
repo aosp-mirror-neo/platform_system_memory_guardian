@@ -1,0 +1,34 @@
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+rust_defaults {
+    name: "pmg_defaults",
+    srcs: [
+        "src/main.rs",
+    ],
+    rustlibs: [
+        "liblogger",
+        "liblog_rust",
+        "libpmg_flags_rust",
+    ],
+}
+
+aconfig_declarations {
+    name: "pmg_flags",
+    package: "android.memory.guardian.flags",
+    container: "system",
+    srcs: ["flags.aconfig"],
+}
+
+rust_aconfig_library {
+    name: "libpmg_flags_rust",
+    crate_name: "pmg_flags",
+    aconfig_declarations: "pmg_flags",
+}
+
+rust_binary {
+    name: "pmg_daemon",
+    defaults: ["pmg_defaults"],
+    stem: "pmg",
+}
