@@ -11,6 +11,7 @@ rust_defaults {
         "liblogger",
         "liblog_rust",
         "libpmg_flags_rust",
+        "librustutils",
     ],
 }
 
@@ -31,4 +32,5 @@ rust_binary {
     name: "pmg_daemon",
     defaults: ["pmg_defaults"],
     stem: "pmg",
+    init_rc: ["pmg.rc"],
 }
