@@ -1,0 +1,10 @@
+service pmgd /system/bin/pmgd
+    class core
+    user system
+    group system
+    disabled
+
+on property:sys.boot_completed=1
+    # The pmgd service always starts but it will suspend forever if the AConfig
+    # flag is disabled.
+    enable pmgd

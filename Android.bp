@@ -3,34 +3,35 @@ package {
 }
 
 rust_defaults {
-    name: "pmg_defaults",
+    name: "pmgd_defaults",
     srcs: [
         "src/main.rs",
     ],
     rustlibs: [
         "liblogger",
         "liblog_rust",
-        "libpmg_flags_rust",
+        "libnix",
+        "libpmgd_flags_rust",
         "librustutils",
     ],
 }
 
 aconfig_declarations {
-    name: "pmg_flags",
+    name: "pmgd_flags",
     package: "android.memory.guardian.flags",
     container: "system",
     srcs: ["flags.aconfig"],
 }
 
 rust_aconfig_library {
-    name: "libpmg_flags_rust",
-    crate_name: "pmg_flags",
-    aconfig_declarations: "pmg_flags",
+    name: "libpmgd_flags_rust",
+    crate_name: "pmgd_flags",
+    aconfig_declarations: "pmgd_flags",
 }
 
 rust_binary {
     name: "pmg_daemon",
-    defaults: ["pmg_defaults"],
-    stem: "pmg",
-    init_rc: ["pmg.rc"],
+    defaults: ["pmgd_defaults"],
+    stem: "pmgd",
+    init_rc: ["pmgd.rc"],
 }
