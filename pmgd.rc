@@ -1,10 +1,11 @@
 service pmgd /system/bin/pmgd
     class core
-    user system
-    group system
+    user nobody
+    group system readproc
     disabled
 
 on property:sys.boot_completed=1
     # The pmgd service always starts but it will suspend forever if the AConfig
     # flag is disabled.
+    restart --only-if-running pmgd
     enable pmgd
