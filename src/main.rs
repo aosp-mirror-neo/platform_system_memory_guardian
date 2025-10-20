@@ -194,7 +194,7 @@ fn create_perfetto_trace() -> io::Result<()> {
     let trace_config = include_str!("../heap_dump.cfg");
 
     let mut child = Command::new("/system/bin/perfetto")
-        .args(["-c", "-", "--txt", "--out", "/data/misc/perfetto-traces/pmgd.pb"])
+        .args(["-c", "-", "--txt", "--upload"])
         .stdin(Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
