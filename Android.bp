@@ -18,9 +18,8 @@ package {
 
 rust_defaults {
     name: "pmgd_defaults",
-    srcs: [
-        "src/main.rs",
-    ],
+    crate_root: "src/main.rs",
+    srcs: ["heap_dump.cfg"],
     rustlibs: [
         "liblogger",
         "liblog_rust",
