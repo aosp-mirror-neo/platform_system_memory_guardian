@@ -31,6 +31,10 @@ use std::thread;
 use std::time::Duration;
 use thiserror::Error;
 
+mod utils;
+
+use utils::Process;
+
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
@@ -81,9 +85,17 @@ fn monitor_system_server() -> MyResult<()> {
     let ss_uid = 1000;
     let ss_gid = 1000;
     let ss_pid = find_pid(ss_uid, ss_gid, "system_server")?;
-    // The path to the cgroup memory event file.
-    let ss_events_path = format!("{}/memory.events", cgroup_path(ss_uid, ss_pid));
-    monitor_process(&ss_events_path)
+
+    let profiles_to_assign = ["SystemServerMemoryHighLimitP99"];
+    let guardian_process = Process::new(ss_uid, ss_pid);
+    let success = guardian_process.assign_profiles(&profiles_to_assign);
+
+    if success {
+        // The path to the cgroup memory event file.
+        let ss_events_path = format!("{}/memory.events", cgroup_path(ss_uid, ss_pid));
+        return monitor_process(&ss_events_path);
+    }
+    Ok(())
 }
 
 // Return the cgroup path for a process.
@@ -165,6 +177,8 @@ fn monitor_process(events_path: &str) -> MyResult<()> {
         if high != new_high {
             info!("new high event {}", new_high);
             let _ = create_perfetto_trace();
+
+            // Stop monitoring after a heap dump
             break;
         } else {
             info!("no change to high event");
