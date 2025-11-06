@@ -26,6 +26,7 @@ rust_defaults {
         "libinotify",
         "libnix",
         "libpmgd_flags_rust",
+        "libprocessgroup_rust",
         "libregex",
         "librustutils",
         "libthiserror",
