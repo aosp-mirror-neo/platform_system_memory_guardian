@@ -7,3 +7,10 @@ flag {
   description: "This flag controls whether Process Memory Guardian Daemon is enabled"
   bug: "434681786"
 }
+
+flag {
+  name: "process_kill_enabled"
+  namespace: "system_performance"
+  description: "All pmgd to kill a process on memory.high events"
+  bug: "434681786"
+}
