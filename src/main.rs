@@ -14,29 +14,30 @@
 
 //! pmgd (process memory guardian) is a native daemon monitoring memcg memory for a process.
 
-use inotify::{Inotify, WatchMask};
-use log::error;
-use log::info;
-use log::warn;
-use log::LevelFilter;
+use atrace::AtraceTag;
+use inotify::{EventMask, WatchDescriptor, WatchMask};
+use log::{error, info, warn, LevelFilter};
+use nix::poll::PollTimeout;
+use nix::sys::epoll::EpollEvent;
 use regex::Regex;
+use std::error::Error;
+use std::fmt;
 use std::fs;
-use std::fs::DirEntry;
 use std::io;
 use std::io::Write;
-use std::path::Path;
 use std::process::Command;
 use std::process::Stdio;
-use std::thread;
-use std::time::Duration;
 use thiserror::Error;
 
-mod utils;
+mod config;
+use config::Configuration;
+use config::Specification;
 
+mod utils;
 use utils::Process;
 
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
+mod watcher;
+use watcher::Watcher;
 
 // Local error class that collects the different kinds of errors that might be reported.
 #[derive(Error, Debug)]
@@ -51,146 +52,261 @@ enum MyError {
     RegexError(#[from] regex::Error),
     #[error("error: {msg}")]
     Application { msg: String },
+    #[error("errno")]
+    Errno(#[from] nix::errno::Errno),
 }
 
 // Type alias for Result with MyError as the fixed error type
 type MyResult<T> = std::result::Result<T, MyError>;
 
-fn main() {
+// The information required to monitor a process and respond to memory events.
+struct TargetMonitor {
+    // The path to the cgroups memory.events entry for the process.
+    events_path: String,
+    // The watch descriptor for the memory.events entry.
+    events_wd: WatchDescriptor,
+    // The last-seen value of the high memory events.
+    high_events: u64,
+}
+
+// The status of a target: its specification and its process.  The process is optional, because
+// the process might not exist.  The monitor is option; it exists only if processes are being
+// monitored for heap dumps.  The structure includes three flags:
+//  found - the process was found and profiles were configured.
+//  handled - a memory event has been seen on this process; no further monitoring
+//  ignore - the process specification is invalid; do not try to use it
+// The proc field may be empty while found is true if handled is true.
+struct TargetStatus {
+    spec: Specification,
+    process: Option<Process>,
+    monitor: Option<TargetMonitor>,
+    found: bool,
+    handled: bool,
+    ignore: bool,
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let config = Configuration::new();
+
     let _init_success = logger::init(
         logger::Config::default().with_tag_on_device("pmgd").with_max_level(LevelFilter::Trace),
     );
 
-    if pmgd_flags::memory_guardian_enabled() {
-        if let Err(e) = monitor_system_server() {
-            error!("{}", e)
-        };
-    } else {
+    if !pmgd_flags::memory_guardian_enabled() {
         // This is a safe guard to ensure that pmgd runs only when AConfig flag is enabled.  If
         // the process exits, init will just restart it, so the process sleeps forever if it is
         // disabled.
         warn!("pmgd is disabled");
+        nix::unistd::pause();
+    }
+
+    // Actually monitor the system.
+    #[cfg(unix)]
+    if let Err(e) = monitor_processes(&config) {
+        error!("{}", e)
     }
 
     // Do not exit, because init will just restart the process. Wait for an external event to kill
     // this process.
     info!("waiting to be restarted");
     nix::unistd::pause();
-}
 
-// Monitor the system server process.
-fn monitor_system_server() -> MyResult<()> {
-    info!("pmgd started");
-
-    let ss_uid = 1000;
-    let ss_gid = 1000;
-    let ss_pid = find_pid(ss_uid, ss_gid, "system_server")?;
-
-    let profiles_to_assign = ["SystemServerMemoryHighLimitP99"];
-    let guardian_process = Process::new(ss_uid, ss_pid);
-    let success = guardian_process.assign_profiles(&profiles_to_assign);
-
-    if success {
-        // The path to the cgroup memory event file.
-        let ss_events_path = format!("{}/memory.events", cgroup_path(ss_uid, ss_pid));
-        return monitor_process(&ss_events_path);
-    }
+    // The universally-recognized "everything is okay" status
     Ok(())
 }
 
-// Return the cgroup path for a process.
-fn cgroup_path(uid: u32, pid: u32) -> String {
-    // See Process.java
-    let first_application_uid: u32 = 10000;
-    let group = if uid < first_application_uid { "system" } else { "apps" };
-    format!("/sys/fs/cgroup/{}/uid_{}/pid_{}", group, uid, pid)
-}
+// Monitor the process list.
+fn monitor_processes(config: &Configuration) -> MyResult<()> {
+    let target_specs = &config.targets;
 
-// Return the pid of process. This method walks /proc looking for the process with matching uid,
-// gid, and cmdline properties.
-fn find_pid(uid: u32, gid: u32, cmd: &str) -> MyResult<u32> {
-    let proc_path = Path::new("/proc");
-    if !proc_path.is_dir() {
-        return Err(MyError::Application { msg: "failed to open /proc".into() });
+    // Construct the target state, one for every specification.
+    let mut targets: Vec<TargetStatus> = Vec::new();
+    for t in target_specs {
+        targets.push(TargetStatus {
+            spec: t.clone(),
+            process: None,
+            monitor: None,
+            found: false,
+            handled: false,
+            ignore: false,
+        });
     }
 
-    let listing = fs::read_dir(proc_path)?;
-    for entry in listing.flatten() {
-        if let Ok(pid) = is_target_process(entry, uid, gid, cmd) {
-            return Ok(pid);
+    let mut watcher = Watcher::new()?;
+
+    // Buffer for received epoll events.
+    let mut events = vec![EpollEvent::empty(); 10];
+
+    // Update the process list once, before the loop.
+    update_processes(&mut targets, &mut watcher);
+    if !any_active(&targets) {
+        return Ok(());
+    }
+
+    // Buffer to receive the inotify events, hoisted out of the loop.
+    let mut buffer = [0u8; 4096];
+    // The monitor loop.  Update processes and then wait for events.
+    while let Ok(num_events) = watcher.wait(&mut events, PollTimeout::NONE) {
+        if num_events > 0 {
+            let _ = atrace::begin_scoped_event(AtraceTag::ActivityManager, "memory_events");
+            if let Ok(events) = watcher.inotify.read_events(&mut buffer) {
+                for e in events {
+                    memory_event(e, &mut targets, &mut watcher);
+                }
+            }
         }
-    }
-
-    // At this point, the code has examined all the entries in/proc and has failed to find the
-    // target process.  Return the "not found" condition.
-    Err(MyError::Application { msg: "no match found".to_string() })
-}
-
-// If the /proc directory entry matches the uid, gid, and command line, return the associated pid.
-fn is_target_process(entry: DirEntry, uid: u32, gid: u32, cmd: &str) -> MyResult<u32> {
-    // Examine the directory entry.  The name must be valid unicode and, it must be an integer.
-    // The entry must identify a directory.
-    let os_name = entry.file_name();
-    let name = os_name.to_str().ok_or(MyError::NotFound)?;
-    let pid = name.parse()?;
-    let file_type = entry.file_type().map_err(|_| MyError::NotFound)?;
-    if !file_type.is_dir() {
-        return Err(MyError::NotFound);
-    }
-
-    // The uid and gid of the directory entry must match the supplied values.
-    #[cfg(unix)]
-    if !fs::metadata(entry.path()).map(|m| uid == m.uid() && gid == m.gid()).unwrap_or(false) {
-        return Err(MyError::NotFound);
-    }
-
-    let cmdline = fs::read_to_string(entry.path().join("cmdline"))?;
-
-    // The string read from /proc/<pid>/cmdline is often padded with trailing spaces.  Until that
-    // is understood, this code matches on leading text.  This is fine when the UID is a system
-    // UID, since there will not be any conflicts.
-    if cmdline.starts_with(cmd) {
-        return Ok(pid);
-    }
-
-    Err(MyError::NotFound)
-}
-
-// Monitor memory events on a process. The process is identified by its cgroup path.  There is no
-// return value.  Outside of linux, this is an empty process.
-#[cfg(unix)]
-fn monitor_process(events_path: &str) -> MyResult<()> {
-    info!("pmgd monitoring {}", events_path);
-
-    let mut high = read_memory_high(events_path)?;
-    info!("read memory high events {}", high);
-
-    // The intended behavior is that the first event will terminate the program.  For development,
-    // events are processed in a loop.
-    loop {
-        let mut inotify: Inotify = Inotify::init()?;
-        inotify.watches().add(events_path, WatchMask::MODIFY)?;
-
-        let mut buffer = [0u8; 4096]; // Buffer to read events into
-        let _events = inotify.read_events_blocking(&mut buffer)?;
-        let new_high = read_memory_high(events_path)?;
-        if high != new_high {
-            info!("new high event {}", new_high);
-            let _ = create_perfetto_trace();
-
-            // Stop monitoring after a heap dump
+        update_processes(&mut targets, &mut watcher);
+        if !any_active(&targets) {
             break;
-        } else {
-            info!("no change to high event");
         }
-        high = new_high;
-
-        // Prevent a notification spam by sleeping 5s.  Note that the inotify object is dropped.
-        // This means that events that occur during sleeping will be ignored, which is reasonable
-        // for a debug image.
-        thread::sleep(Duration::from_secs(5));
     }
+
     Ok(())
+}
+
+// Update the process information for a list of targets.  Return true if there are any active
+// processes.
+fn update_processes(targets: &mut Vec<TargetStatus>, watch: &mut Watcher) {
+    atrace::trace_method!(AtraceTag::ActivityManager);
+
+    for t in targets {
+        if t.ignore {
+            // The process was specified with an invalid task profile and is not properly
+            // configured.
+            continue;
+        }
+
+        // Check if a target we found earlier is still valid.
+        if let Some(process) = &t.process {
+            if !process.is_alive() {
+                info!("dropping {}", t.spec.cmd);
+                detach_process(t, watch);
+            }
+        }
+
+        // This block is hit if the target was not known when the function was entered, or if
+        // the previously recorded process exited.
+        if !t.found {
+            if let Ok(p) = Process::from(&t.spec) {
+                let key = format!("{} - {}", t.spec.cmd, p);
+                if !p.assign_profile(&t.spec) {
+                    warn!("failed to configure {} - ignoring", key);
+                    t.process = None;
+                    t.ignore = true;
+                    continue;
+                }
+                if watch.add_process(&p).is_err() {
+                    warn!("failed to watch {} - ignoring", key);
+                    t.process = None;
+                    t.ignore = true;
+                    continue;
+                }
+                info!("acquired {}", key);
+                t.process = Some(p);
+                t.found = true;
+
+                if !t.handled {
+                    // Attach for monitoring if the daemon has not seen any previous memory
+                    // events.
+                    if let Some(p) = &t.process {
+                        t.monitor = attach_process(p, watch);
+                    }
+                    if t.monitor.is_some() {
+                        info!("attached {}", key);
+                    } else {
+                        // The process could not be monitored.
+                        warn!("not monitoring {}", key);
+                    }
+                } else {
+                    info!("found {} already handled", key);
+                }
+            }
+        }
+    }
+}
+
+// Return true if there are any active processes left to monitor or configure.
+fn any_active(targets: &Vec<TargetStatus>) -> bool {
+    for t in targets {
+        if !t.ignore {
+            return true;
+        }
+    }
+    false
+}
+
+// Given a Process, create a TargetProcess.  If heap dumps are desired, the process is also
+// monitored.
+fn attach_process(proc: &Process, watcher: &mut Watcher) -> Option<TargetMonitor> {
+    let epath = proc.events_path();
+
+    let start = match read_memory_high(&epath) {
+        Ok(h) => h,
+        Err(e) => {
+            error!("failed to read {}: {}", epath, e);
+            watcher.delete_process(proc);
+            return None;
+        }
+    };
+
+    let desc = match watcher.add_path(&epath, WatchMask::MODIFY) {
+        Ok(d) => d,
+        Err(_) => {
+            watcher.delete_process(proc);
+            return None;
+        }
+    };
+
+    Some(TargetMonitor { events_path: epath, events_wd: desc, high_events: start })
+}
+
+// Detach a process that was successfully attached.
+fn detach_process(target: &mut TargetStatus, watch: &mut Watcher) {
+    if let Some(p) = &target.process {
+        info!("detaching {} - {}", target.spec.cmd, p);
+        if let Some(m) = &target.monitor {
+            watch.remove_path(m.events_wd.clone());
+        }
+        watch.delete_process(p);
+        target.found = false;
+        target.monitor = None;
+        target.process = None;
+    }
+}
+
+// Process a single inotify event.
+fn memory_event(
+    e: inotify::Event<&std::ffi::OsStr>,
+    targets: &mut Vec<TargetStatus>,
+    watcher: &mut Watcher,
+) {
+    // High-memory events are trigged by a MODIFY event.  Other events are likely process
+    // start/stop events.  If this is not a high-memory event, just return.
+    if !e.mask.contains(EventMask::MODIFY) {
+        return;
+    }
+
+    let fired = e.wd;
+    for t in &mut *targets {
+        if let Some(proc) = &mut t.monitor {
+            if proc.events_wd == fired {
+                info!("memory event on {}", t.spec.cmd);
+                if let Ok(new_high) = read_memory_high(&proc.events_path) {
+                    info!(
+                        "memory event on {} high is={} was={}",
+                        t.spec.cmd, new_high, proc.high_events
+                    );
+                    if new_high > proc.high_events {
+                        handle_memory_high_event(t);
+                        // Now forget proc.  It is no longer watched.
+                        detach_process(t, watcher);
+                    } else {
+                        warn!("event on {} but no change in high", t.spec.cmd);
+                    }
+                }
+            }
+        }
+    }
 }
 
 // Read the memory high count from the events file.
@@ -204,11 +320,27 @@ fn read_memory_high(path: &str) -> Result<u64, MyError> {
     }
 }
 
+// Handle a high-memory event.  A heap dump is triggered and the process is killed.  This method
+// does nothing if the process has been handled once already.
+fn handle_memory_high_event(proc: &mut TargetStatus) {
+    proc.handled = true;
+    let _ = create_perfetto_trace();
+    // Note: it would be very surprising to reach this point with proc unset.
+    if pmgd_flags::process_kill_enabled() {
+        if let Some(p) = &proc.process {
+            p.kill();
+        }
+    }
+    // Do not mark the process lost (even though it should be killed).  The lost process will be
+    // detected in the main loop.
+}
+
 fn create_perfetto_trace() -> io::Result<()> {
     let trace_config = include_str!("../heap_dump.cfg");
+    let args = vec!["-c", "-", "--txt", "--upload"];
 
     let mut child = Command::new("/system/bin/perfetto")
-        .args(["-c", "-", "--txt", "--upload"])
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -236,8 +368,12 @@ fn create_perfetto_trace() -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
-fn monitor_process(_cgroup_path: &str) -> MyResult<()> {
-    error!("pmgd not supported outside unix");
-    Err(MyError::Application("not supported".into()))
+impl fmt::Display for TargetStatus {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if let Some(p) = &self.process {
+            p.fmt(f)
+        } else {
+            self.spec.fmt(f)
+        }
+    }
 }

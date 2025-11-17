@@ -21,9 +21,11 @@ rust_defaults {
     crate_root: "src/main.rs",
     srcs: ["heap_dump.cfg"],
     rustlibs: [
-        "liblogger",
-        "liblog_rust",
+        "libatrace_rust",
         "libinotify",
+        "liblibc",
+        "liblog_rust",
+        "liblogger",
         "libnix",
         "libpmgd_flags_rust",
         "libprocessgroup_rust",
