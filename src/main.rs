@@ -19,6 +19,7 @@ use inotify::{EventMask, WatchDescriptor, WatchMask};
 use log::{error, info, warn, LevelFilter};
 use nix::poll::PollTimeout;
 use nix::sys::epoll::EpollEvent;
+use rand::Rng;
 use regex::Regex;
 use std::error::Error;
 use std::fmt;
@@ -336,7 +337,11 @@ fn handle_memory_high_event(proc: &mut TargetStatus) {
 }
 
 fn create_perfetto_trace() -> io::Result<()> {
-    let trace_config = include_str!("../heap_dump.cfg");
+    let trace_template = include_str!("../heap_dump.cfg");
+
+    let random_msb: u32 = rand::thread_rng().gen();
+    let trace_config = trace_template.replace("TARGET_MSB", &random_msb.to_string());
+
     let args = vec!["-c", "-", "--txt", "--upload"];
 
     let mut child = Command::new("/system/bin/perfetto")
