@@ -34,6 +34,8 @@ mod config;
 use config::Configuration;
 use config::Specification;
 
+mod logging;
+
 mod utils;
 use utils::Process;
 
@@ -70,14 +72,14 @@ struct TargetMonitor {
     high_events: u64,
 }
 
-// The status of a target: its specification and its process.  The process is optional, because
+// The MonitoredProcess contains: its specification and its process.  The process is optional, because
 // the process might not exist.  The monitor is option; it exists only if processes are being
 // monitored for heap dumps.  The structure includes three flags:
 //  found - the process was found and profiles were configured.
 //  handled - a memory event has been seen on this process; no further monitoring
 //  ignore - the process specification is invalid; do not try to use it
 // The proc field may be empty while found is true if handled is true.
-struct TargetStatus {
+struct MonitoredProcess {
     spec: Specification,
     process: Option<Process>,
     monitor: Option<TargetMonitor>,
@@ -121,9 +123,9 @@ fn monitor_processes(config: &Configuration) -> MyResult<()> {
     let target_specs = &config.targets;
 
     // Construct the target state, one for every specification.
-    let mut targets: Vec<TargetStatus> = Vec::new();
+    let mut targets: Vec<MonitoredProcess> = Vec::new();
     for t in target_specs {
-        targets.push(TargetStatus {
+        targets.push(MonitoredProcess {
             spec: t.clone(),
             process: None,
             monitor: None,
@@ -167,7 +169,7 @@ fn monitor_processes(config: &Configuration) -> MyResult<()> {
 
 // Update the process information for a list of targets.  Return true if there are any active
 // processes.
-fn update_processes(targets: &mut Vec<TargetStatus>, watch: &mut Watcher) {
+fn update_processes(targets: &mut Vec<MonitoredProcess>, watch: &mut Watcher) {
     atrace::trace_method!(AtraceTag::ActivityManager);
 
     for t in targets {
@@ -227,7 +229,7 @@ fn update_processes(targets: &mut Vec<TargetStatus>, watch: &mut Watcher) {
 }
 
 // Return true if there are any active processes left to monitor or configure.
-fn any_active(targets: &Vec<TargetStatus>) -> bool {
+fn any_active(targets: &Vec<MonitoredProcess>) -> bool {
     for t in targets {
         if !t.ignore {
             return true;
@@ -262,7 +264,7 @@ fn attach_process(proc: &Process, watcher: &mut Watcher) -> Option<TargetMonitor
 }
 
 // Detach a process that was successfully attached.
-fn detach_process(target: &mut TargetStatus, watch: &mut Watcher) {
+fn detach_process(target: &mut MonitoredProcess, watch: &mut Watcher) {
     if let Some(p) = &target.process {
         info!("detaching {} - {}", target.spec.cmd, p);
         if let Some(m) = &target.monitor {
@@ -278,7 +280,7 @@ fn detach_process(target: &mut TargetStatus, watch: &mut Watcher) {
 // Process a single inotify event.
 fn memory_event(
     e: inotify::Event<&std::ffi::OsStr>,
-    targets: &mut Vec<TargetStatus>,
+    targets: &mut Vec<MonitoredProcess>,
     watcher: &mut Watcher,
 ) {
     // High-memory events are trigged by a MODIFY event.  Other events are likely process
@@ -323,13 +325,22 @@ fn read_memory_high(path: &str) -> Result<u64, MyError> {
 
 // Handle a high-memory event.  A heap dump is triggered and the process is killed.  This method
 // does nothing if the process has been handled once already.
-fn handle_memory_high_event(proc: &mut TargetStatus) {
-    proc.handled = true;
+fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) {
+    monitored_process.handled = true;
+
+    if let (Some(process), Some(uid)) = (&monitored_process.process, monitored_process.spec.uid) {
+        logging::log_threshold_exceeded(
+            uid as i32,
+            &monitored_process.spec.cmd,
+            process.pid.try_into().unwrap(),
+        );
+    }
+
     let _ = create_perfetto_trace();
     // Note: it would be very surprising to reach this point with proc unset.
     if pmgd_flags::process_kill_enabled() {
-        if let Some(p) = &proc.process {
-            p.kill();
+        if let Some(process) = &monitored_process.process {
+            process.kill();
         }
     }
     // Do not mark the process lost (even though it should be killed).  The lost process will be
@@ -373,7 +384,7 @@ fn create_perfetto_trace() -> io::Result<()> {
     Ok(())
 }
 
-impl fmt::Display for TargetStatus {
+impl fmt::Display for MonitoredProcess {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         if let Some(p) = &self.process {
             p.fmt(f)
