@@ -89,8 +89,6 @@ struct MonitoredProcess {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let config = Configuration::new();
-
     let _init_success = logger::init(
         logger::Config::default().with_tag_on_device("pmgd").with_max_level(LevelFilter::Trace),
     );
@@ -100,6 +98,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         // the process exits, init will just restart it, so the process sleeps forever if it is
         // disabled.
         warn!("pmgd is disabled");
+        nix::unistd::pause();
+    }
+
+    let config = Configuration::load_config();
+    if config.targets.is_empty() {
+        warn!("pmgd found no vendor config in vendor/etc");
         nix::unistd::pause();
     }
 
@@ -182,7 +186,7 @@ fn update_processes(targets: &mut Vec<MonitoredProcess>, watch: &mut Watcher) {
         // Check if a target we found earlier is still valid.
         if let Some(process) = &t.process {
             if !process.is_alive() {
-                info!("dropping {}", t.spec.cmd);
+                info!("dropping {}", t.spec.target_cmd);
                 detach_process(t, watch);
             }
         }
@@ -191,7 +195,7 @@ fn update_processes(targets: &mut Vec<MonitoredProcess>, watch: &mut Watcher) {
         // the previously recorded process exited.
         if !t.found {
             if let Ok(p) = Process::from(&t.spec) {
-                let key = format!("{} - {}", t.spec.cmd, p);
+                let key = format!("{} - {}", t.spec.target_cmd, p);
                 if !p.assign_profile(&t.spec) {
                     warn!("failed to configure {} - ignoring", key);
                     t.process = None;
@@ -265,8 +269,9 @@ fn attach_process(proc: &Process, watcher: &mut Watcher) -> Option<TargetMonitor
 
 // Detach a process that was successfully attached.
 fn detach_process(target: &mut MonitoredProcess, watch: &mut Watcher) {
+    atrace::trace_method!(AtraceTag::ActivityManager);
     if let Some(p) = &target.process {
-        info!("detaching {} - {}", target.spec.cmd, p);
+        info!("detaching {} - {}", target.spec.target_cmd, p);
         if let Some(m) = &target.monitor {
             watch.remove_path(m.events_wd.clone());
         }
@@ -283,6 +288,7 @@ fn memory_event(
     targets: &mut Vec<MonitoredProcess>,
     watcher: &mut Watcher,
 ) {
+    atrace::trace_method!(AtraceTag::ActivityManager);
     // High-memory events are trigged by a MODIFY event.  Other events are likely process
     // start/stop events.  If this is not a high-memory event, just return.
     if !e.mask.contains(EventMask::MODIFY) {
@@ -293,18 +299,18 @@ fn memory_event(
     for t in &mut *targets {
         if let Some(proc) = &mut t.monitor {
             if proc.events_wd == fired {
-                info!("memory event on {}", t.spec.cmd);
+                info!("memory event on {}", t.spec.target_cmd);
                 if let Ok(new_high) = read_memory_high(&proc.events_path) {
                     info!(
                         "memory event on {} high is={} was={}",
-                        t.spec.cmd, new_high, proc.high_events
+                        t.spec.target_cmd, new_high, proc.high_events
                     );
                     if new_high > proc.high_events {
                         handle_memory_high_event(t);
                         // Now forget proc.  It is no longer watched.
                         detach_process(t, watcher);
                     } else {
-                        warn!("event on {} but no change in high", t.spec.cmd);
+                        warn!("event on {} but no change in high", t.spec.target_cmd);
                     }
                 }
             }
@@ -314,6 +320,7 @@ fn memory_event(
 
 // Read the memory high count from the events file.
 fn read_memory_high(path: &str) -> Result<u64, MyError> {
+    atrace::trace_method!(AtraceTag::ActivityManager);
     let stats = fs::read_to_string(path)?;
     let high_re = Regex::new(r"high\s+(\d+)")?;
     if let Some(captures) = high_re.captures(&stats) {
@@ -326,12 +333,13 @@ fn read_memory_high(path: &str) -> Result<u64, MyError> {
 // Handle a high-memory event.  A heap dump is triggered and the process is killed.  This method
 // does nothing if the process has been handled once already.
 fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) {
+    atrace::trace_method!(AtraceTag::ActivityManager);
     monitored_process.handled = true;
 
     if let (Some(process), Some(uid)) = (&monitored_process.process, monitored_process.spec.uid) {
         logging::log_threshold_exceeded(
             uid as i32,
-            &monitored_process.spec.cmd,
+            &monitored_process.spec.target_cmd,
             process.pid.try_into().unwrap(),
         );
     }

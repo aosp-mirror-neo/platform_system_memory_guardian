@@ -21,6 +21,7 @@ rust_defaults {
     crate_root: "src/main.rs",
     srcs: ["heap_dump.cfg"],
     rustlibs: [
+        "libanyhow",
         "libatrace_rust",
         "libinotify",
         "liblibc",
@@ -33,6 +34,8 @@ rust_defaults {
         "librustutils",
         "libthiserror",
         "librand",
+        "libserde",
+        "libserde_json",
         "libstatslog_rust",
         "libpmgd_statslog",
     ],

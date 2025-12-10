@@ -86,16 +86,16 @@ impl Process {
     pub fn assign_profile(&self, spec: &Specification) -> bool {
         // An empty profile list only appears during development and testing.  Treat it as
         // success.
-        if spec.profile.is_empty() {
-            info!("no profile on {}", spec.cmd);
+        if spec.mem_limit_profile.is_empty() {
+            info!("no profile on {}", spec.target_cmd);
             return true;
         }
         let pid: i32 = self.pid.try_into().unwrap();
-        let plist: Vec<&str> = spec.profile.iter().map(|s| s.as_str()).collect();
+        let plist: Vec<&str> = vec![spec.mem_limit_profile.as_str()];
         match processgroup::set_process_profiles(self.uid, pid, &plist) {
             Ok(_) => true,
             Err(e) => {
-                error!("failed to set profiles on {} {}: {}", spec.cmd, pid, e);
+                error!("failed to set profiles on {} {}: {}", spec.target_cmd, pid, e);
                 false
             }
         }
@@ -123,7 +123,7 @@ impl Process {
     }
 
     // If the /proc directory entry matches the uid, and command line, return the pid and uid.
-    fn is_process(entry: DirEntry, target: &Specification) -> MyResult<Self> {
+    fn is_process(entry: DirEntry, target_spec: &Specification) -> MyResult<Self> {
         // Examine the directory entry.  The name must be valid unicode and, it must be an integer.
         // The entry must identify a directory.
         let os_name = entry.file_name();
@@ -139,8 +139,8 @@ impl Process {
         let meta = fs::metadata(entry.path())?;
         let process_uid = meta.uid();
 
-        // If there is a target uid, match it now.
-        if let Some(want_uid) = target.uid {
+        // If there is a target_spec uid, match it now.
+        if let Some(want_uid) = target_spec.uid {
             if want_uid != process_uid {
                 return Err(MyError::NotFound);
             }
@@ -150,7 +150,7 @@ impl Process {
         // are discarded before comparing.
         let cpath = format!("/proc/{}/cmdline", process_pid);
         let cmdline = fs::read_to_string(&cpath)?;
-        if Self::trim_nulls(&cmdline) == target.cmd {
+        if Self::trim_nulls(&cmdline) == target_spec.target_cmd {
             let pfd = Self::pid_fd(process_pid).ok();
             Ok(Process { pid: process_pid, uid: process_uid, cmd_path: cpath, pfd })
         } else {
