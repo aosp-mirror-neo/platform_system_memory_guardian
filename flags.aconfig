@@ -9,6 +9,13 @@ flag {
 }
 
 flag {
+  name: "memory_guardian_uses_vendor_config"
+  namespace: "system_performance"
+  description: "This flag controls whether PMGD uses a vendor config to monitor procesess"
+  bug: "469171835"
+}
+
+flag {
   name: "process_kill_enabled"
   namespace: "system_performance"
   description: "All pmgd to kill a process on memory.high events"
