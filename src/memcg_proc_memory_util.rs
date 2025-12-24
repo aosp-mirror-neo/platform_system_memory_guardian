@@ -15,7 +15,10 @@
 //! pmgd (process memory guardian) is a native daemon monitoring memcg memory for a process.
 //! This module contains the utilities to read MemcgV2 memory values for a process
 
+use anyhow::{anyhow, Context, Result};
+use atrace::AtraceTag;
 use log::error;
+use regex::Regex;
 use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -41,6 +44,22 @@ pub fn read_cgroup_memory_stat_path(uid: u32, pid: u32) -> PathBuf {
 
 fn read_cgroup_file_as_u64(path: &Path) -> Option<u64> {
     fs::read_to_string(path).ok().and_then(|s| s.trim().parse::<u64>().ok())
+}
+
+// Read the memory high count from the events file.
+pub fn read_memory_high(path: &str) -> Result<u64> {
+    atrace::trace_method!(AtraceTag::ActivityManager);
+    let stats = fs::read_to_string(path)?;
+    let high_re = Regex::new(r"high\s+(\d+)").context("Failed to compile memory.high regex")?;
+
+    if let Some(captures) = high_re.captures(&stats) {
+        let value =
+            captures[1].parse::<u64>().context("Found memory.high but failed to parse integer")?;
+
+        Ok(value)
+    } else {
+        Err(anyhow!("'high' key not found in memory.events file"))
+    }
 }
 
 pub fn read_cgroup_memory_swap_kb(uid: u32, pid: u32) -> u32 {

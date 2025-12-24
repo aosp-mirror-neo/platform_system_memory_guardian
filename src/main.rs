@@ -20,10 +20,8 @@ use log::{error, info, warn, LevelFilter};
 use nix::poll::PollTimeout;
 use nix::sys::epoll::EpollEvent;
 use rand::Rng;
-use regex::Regex;
 use std::error::Error;
 use std::fmt;
-use std::fs;
 use std::io;
 use std::io::Write;
 use std::process::Command;
@@ -39,7 +37,7 @@ use config::Specification;
 mod memcg_proc_memory_util;
 use memcg_proc_memory_util::{
     read_cgroup_memory_current_kb, read_cgroup_memory_high_kb, read_cgroup_memory_stat,
-    read_cgroup_memory_swap_kb,
+    read_cgroup_memory_swap_kb, read_memory_high,
 };
 
 mod logging;
@@ -339,18 +337,6 @@ fn memory_event(
                 }
             }
         }
-    }
-}
-
-// Read the memory high count from the events file.
-fn read_memory_high(path: &str) -> Result<u64, MyError> {
-    atrace::trace_method!(AtraceTag::ActivityManager);
-    let stats = fs::read_to_string(path)?;
-    let high_re = Regex::new(r"high\s+(\d+)")?;
-    if let Some(captures) = high_re.captures(&stats) {
-        Ok(captures[1].parse()?)
-    } else {
-        Err(MyError::NotFound)
     }
 }
 
