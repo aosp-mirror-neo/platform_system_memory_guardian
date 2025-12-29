@@ -43,7 +43,7 @@ fn read_cgroup_file_as_u64(path: &Path) -> Option<u64> {
     fs::read_to_string(path).ok().and_then(|s| s.trim().parse::<u64>().ok())
 }
 
-pub fn read_cgroup_memory_swap(uid: u32, pid: u32) -> u32 {
+pub fn read_cgroup_memory_swap_kb(uid: u32, pid: u32) -> u32 {
     let mut path = read_cgroup_base_path(uid, pid);
     path.push("memory.swap.current");
 
@@ -54,6 +54,20 @@ pub fn read_cgroup_memory_swap(uid: u32, pid: u32) -> u32 {
             0
         }
     }
+}
+
+pub fn read_cgroup_memory_high_kb(uid: u32, pid: u32) -> Option<u32> {
+    let mut path = read_cgroup_base_path(uid, pid);
+    path.push("memory.high");
+
+    read_cgroup_file_as_u64(&path).map(|bytes| (bytes / 1024) as u32)
+}
+
+pub fn read_cgroup_memory_current_kb(uid: u32, pid: u32) -> Option<u32> {
+    let mut path = read_cgroup_base_path(uid, pid);
+    path.push("memory.current");
+
+    read_cgroup_file_as_u64(&path).map(|bytes| (bytes / 1024) as u32)
 }
 
 pub fn read_cgroup_memory_stat(uid: u32, pid: u32) -> CgroupMemStat {
