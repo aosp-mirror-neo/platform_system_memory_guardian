@@ -34,6 +34,8 @@ mod config;
 use config::Configuration;
 use config::Specification;
 
+mod memcg_proc_memory_util;
+
 mod logging;
 
 mod utils;
@@ -337,18 +339,29 @@ fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) {
     monitored_process.handled = true;
 
     if let (Some(process), Some(uid)) = (&monitored_process.process, monitored_process.spec.uid) {
+        let mem_stats = memcg_proc_memory_util::read_cgroup_memory_stat(uid, process.pid);
+        let swap_kb = memcg_proc_memory_util::read_cgroup_memory_swap(uid, process.pid);
+
         logging::log_threshold_exceeded(
             uid as i32,
             &monitored_process.spec.target_cmd,
-            process.pid.try_into().unwrap(),
+            &mem_stats,
+            swap_kb,
         );
-    }
 
-    let _ = create_perfetto_trace();
-    // Note: it would be very surprising to reach this point with proc unset.
-    if pmgd_flags::process_kill_enabled() {
-        if let Some(process) = &monitored_process.process {
-            process.kill();
+        let _ = create_perfetto_trace();
+
+        if pmgd_flags::process_kill_enabled() {
+            if let Some(anon_limit_in_mb) = monitored_process.spec.anon_limit_in_mb {
+                let anon_memory_in_mb = mem_stats.anon_kilobytes / 1024;
+                warn!(
+                    "anon_memory_in_mb:anon_limit_in_mb {}:{}",
+                    anon_memory_in_mb, anon_limit_in_mb
+                );
+                if anon_memory_in_mb > anon_limit_in_mb {
+                    process.kill();
+                }
+            }
         }
     }
     // Do not mark the process lost (even though it should be killed).  The lost process will be
