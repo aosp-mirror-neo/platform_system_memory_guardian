@@ -37,6 +37,7 @@ use config::Specification;
 mod memcg_proc_memory_util;
 
 mod logging;
+use logging::{log_anon_memory_breach, log_threshold_exceeded};
 
 mod utils;
 use utils::Process;
@@ -59,6 +60,16 @@ enum MyError {
     Application { msg: String },
     #[error("errno")]
     Errno(#[from] nix::errno::Errno),
+}
+
+#[derive(PartialEq, Debug)]
+enum HighMemoryEventResult {
+    KilledDueToHighAnonMemory,
+    // TODO: Add once implemented
+    // KilledDueToFailedToReclaim,
+    NoOpDueToInvalidConfigParsing,
+    NoOpDueToDisabledKill, // TODO remove once process_kill_enabled is removed
+    ReclaimSuccessful,
 }
 
 // Type alias for Result with MyError as the fixed error type
@@ -308,9 +319,14 @@ fn memory_event(
                         t.spec.target_cmd, new_high, proc.high_events
                     );
                     if new_high > proc.high_events {
-                        handle_memory_high_event(t);
-                        // Now forget proc.  It is no longer watched.
-                        detach_process(t, watcher);
+                        match handle_memory_high_event(t) {
+                            res if res != HighMemoryEventResult::ReclaimSuccessful => {
+                                detach_process(t, watcher);
+                            }
+                            _ => {
+                                info!("not detaching");
+                            }
+                        }
                     } else {
                         warn!("event on {} but no change in high", t.spec.target_cmd);
                     }
@@ -334,7 +350,7 @@ fn read_memory_high(path: &str) -> Result<u64, MyError> {
 
 // Handle a high-memory event.  A heap dump is triggered and the process is killed.  This method
 // does nothing if the process has been handled once already.
-fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) {
+fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) -> HighMemoryEventResult {
     atrace::trace_method!(AtraceTag::ActivityManager);
     monitored_process.handled = true;
 
@@ -342,30 +358,40 @@ fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) {
         let mem_stats = memcg_proc_memory_util::read_cgroup_memory_stat(uid, process.pid);
         let swap_kb = memcg_proc_memory_util::read_cgroup_memory_swap(uid, process.pid);
 
-        logging::log_threshold_exceeded(
-            uid as i32,
-            &monitored_process.spec.target_cmd,
-            &mem_stats,
-            swap_kb,
-        );
+        log_threshold_exceeded(uid as i32, &monitored_process.spec.target_cmd, &mem_stats, swap_kb);
 
         let _ = create_perfetto_trace();
 
+        // LINT.IfChange
         if pmgd_flags::process_kill_enabled() {
+            // LINT.ThenChange(HighMemoryEventResult)
             if let Some(anon_limit_in_mb) = monitored_process.spec.anon_limit_in_mb {
                 let anon_memory_in_mb = mem_stats.anon_kilobytes / 1024;
                 warn!(
-                    "anon_memory_in_mb:anon_limit_in_mb {}:{}",
-                    anon_memory_in_mb, anon_limit_in_mb
+                    "killing pid_{} anon_memory {}mb > limit {}mb",
+                    process.pid, anon_memory_in_mb, anon_limit_in_mb
                 );
+
                 if anon_memory_in_mb > anon_limit_in_mb {
+                    log_anon_memory_breach(
+                        uid as i32,
+                        &monitored_process.spec.target_cmd,
+                        &mem_stats,
+                        swap_kb,
+                    );
                     process.kill();
+                    return HighMemoryEventResult::KilledDueToHighAnonMemory;
                 }
+            } else {
+                return HighMemoryEventResult::NoOpDueToInvalidConfigParsing;
             }
+        } else {
+            return HighMemoryEventResult::NoOpDueToDisabledKill;
         }
+    } else {
+        return HighMemoryEventResult::NoOpDueToInvalidConfigParsing;
     }
-    // Do not mark the process lost (even though it should be killed).  The lost process will be
-    // detected in the main loop.
+    HighMemoryEventResult::ReclaimSuccessful
 }
 
 fn create_perfetto_trace() -> io::Result<()> {
