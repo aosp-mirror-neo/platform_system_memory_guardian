@@ -62,3 +62,20 @@ pub fn log_anon_memory_breach(
     };
     let _ = stats_atom.stats_write();
 }
+
+pub fn log_total_memory_breach(
+    uid: i32,
+    process_name: &str,
+    mem_stats: &CgroupMemStat,
+    swap_kb: u32,
+) {
+    let stats_atom = MemcgMemoryProcessKillEvent {
+        uid,
+        process_name,
+        kill_reason: KillReason::TotalMemcgMemoryBreach,
+        anon_memory_in_kilobytes: mem_stats.anon_kilobytes as i32,
+        file_memory_in_kilobytes: mem_stats.file_kilobytes as i32,
+        memory_swap_current_in_kilobytes: swap_kb as i32,
+    };
+    let _ = stats_atom.stats_write();
+}

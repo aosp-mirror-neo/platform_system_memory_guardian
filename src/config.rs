@@ -59,6 +59,7 @@ impl Configuration {
                             mem_limit_profile: "SystemServerMemoryHighLimitP99".to_string(),
                             anon_limit_in_mb: None,
                             additional_task_profiles: None,
+                            reclaim_wait_time_secs: default_reclaim_wait_time(),
                         }],
                     }
                 } else {
@@ -81,10 +82,17 @@ pub struct Specification {
     pub uid: Option<u32>,
     pub anon_limit_in_mb: Option<u32>,
     pub additional_task_profiles: Option<Vec<String>>,
+
+    #[serde(default = "default_reclaim_wait_time")]
+    pub reclaim_wait_time_secs: u32,
 }
 
 impl fmt::Display for Specification {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.target_cmd)
     }
+}
+
+fn default_reclaim_wait_time() -> u32 {
+    5
 }

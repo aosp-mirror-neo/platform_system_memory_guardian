@@ -20,14 +20,14 @@ use log::{error, info, warn, LevelFilter};
 use nix::poll::PollTimeout;
 use nix::sys::epoll::EpollEvent;
 use rand::Rng;
-use regex::Regex;
 use std::error::Error;
 use std::fmt;
-use std::fs;
 use std::io;
 use std::io::Write;
 use std::process::Command;
 use std::process::Stdio;
+use std::thread;
+use std::time::Duration;
 use thiserror::Error;
 
 mod config;
@@ -35,9 +35,13 @@ use config::Configuration;
 use config::Specification;
 
 mod memcg_proc_memory_util;
+use memcg_proc_memory_util::{
+    read_cgroup_memory_current_kb, read_cgroup_memory_high_kb, read_cgroup_memory_stat,
+    read_cgroup_memory_swap_kb, read_memory_high,
+};
 
 mod logging;
-use logging::{log_anon_memory_breach, log_threshold_exceeded};
+use logging::{log_anon_memory_breach, log_threshold_exceeded, log_total_memory_breach};
 
 mod utils;
 use utils::Process;
@@ -65,9 +69,9 @@ enum MyError {
 #[derive(PartialEq, Debug)]
 enum HighMemoryEventResult {
     KilledDueToHighAnonMemory,
-    // TODO: Add once implemented
-    // KilledDueToFailedToReclaim,
+    KilledDueToInsufficientReclaim,
     NoOpDueToInvalidConfigParsing,
+    NoOpDueToFailedCgroupRead,
     NoOpDueToDisabledKill, // TODO remove once process_kill_enabled is removed
     ReclaimSuccessful,
 }
@@ -336,18 +340,6 @@ fn memory_event(
     }
 }
 
-// Read the memory high count from the events file.
-fn read_memory_high(path: &str) -> Result<u64, MyError> {
-    atrace::trace_method!(AtraceTag::ActivityManager);
-    let stats = fs::read_to_string(path)?;
-    let high_re = Regex::new(r"high\s+(\d+)")?;
-    if let Some(captures) = high_re.captures(&stats) {
-        Ok(captures[1].parse()?)
-    } else {
-        Err(MyError::NotFound)
-    }
-}
-
 // Handle a high-memory event.  A heap dump is triggered and the process is killed.  This method
 // does nothing if the process has been handled once already.
 fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) -> HighMemoryEventResult {
@@ -355,38 +347,75 @@ fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) -> HighMem
     monitored_process.handled = true;
 
     if let (Some(process), Some(uid)) = (&monitored_process.process, monitored_process.spec.uid) {
-        let mem_stats = memcg_proc_memory_util::read_cgroup_memory_stat(uid, process.pid);
-        let swap_kb = memcg_proc_memory_util::read_cgroup_memory_swap(uid, process.pid);
+        let target_pid = process.pid;
+        let mem_stats = read_cgroup_memory_stat(uid, target_pid);
+        let swap_kb = read_cgroup_memory_swap_kb(uid, target_pid);
 
         log_threshold_exceeded(uid as i32, &monitored_process.spec.target_cmd, &mem_stats, swap_kb);
 
         let _ = create_perfetto_trace();
 
         // LINT.IfChange
-        if pmgd_flags::process_kill_enabled() {
+        if !pmgd_flags::process_kill_enabled() {
             // LINT.ThenChange(HighMemoryEventResult)
-            if let Some(anon_limit_in_mb) = monitored_process.spec.anon_limit_in_mb {
-                let anon_memory_in_mb = mem_stats.anon_kilobytes / 1024;
+            return HighMemoryEventResult::NoOpDueToDisabledKill;
+        }
+        if let Some(anon_limit_in_mb) = monitored_process.spec.anon_limit_in_mb {
+            let anon_memory_in_mb = mem_stats.anon_kilobytes / 1024;
+            warn!("pid_{} anon_memory {}/{}mb ", target_pid, anon_memory_in_mb, anon_limit_in_mb);
+
+            if anon_memory_in_mb > anon_limit_in_mb {
                 warn!(
                     "killing pid_{} anon_memory {}mb > limit {}mb",
-                    process.pid, anon_memory_in_mb, anon_limit_in_mb
+                    target_pid, anon_memory_in_mb, anon_limit_in_mb
                 );
+                log_anon_memory_breach(
+                    uid as i32,
+                    &monitored_process.spec.target_cmd,
+                    &mem_stats,
+                    swap_kb,
+                );
+                process.kill();
+                return HighMemoryEventResult::KilledDueToHighAnonMemory;
+            } else {
+                info!(
+                    "Waiting for memory reclaim for {} seconds",
+                    monitored_process.spec.reclaim_wait_time_secs
+                );
+                thread::sleep(Duration::from_secs(
+                    monitored_process.spec.reclaim_wait_time_secs.into(),
+                ));
 
-                if anon_memory_in_mb > anon_limit_in_mb {
-                    log_anon_memory_breach(
+                let mem_high_opt = read_cgroup_memory_high_kb(uid, target_pid);
+                let mem_curr_opt = read_cgroup_memory_current_kb(uid, target_pid);
+
+                if mem_high_opt.is_none() || mem_curr_opt.is_none() {
+                    error!("Failed to read cgroup memory values for pid_{}", target_pid);
+                    return HighMemoryEventResult::NoOpDueToFailedCgroupRead;
+                }
+                let mem_high = mem_high_opt.unwrap();
+                let mem_curr = mem_curr_opt.unwrap();
+
+                info!("mem_curr {}mb > mem_high {}mb", mem_curr, mem_high);
+                if mem_curr >= mem_high {
+                    warn!(
+                        "killing pid_{} mem_curr {}mb >= mem_high {}mb",
+                        target_pid, mem_curr, mem_high
+                    );
+                    let mem_stats = read_cgroup_memory_stat(uid, target_pid);
+                    let swap_kb = read_cgroup_memory_swap_kb(uid, target_pid);
+                    log_total_memory_breach(
                         uid as i32,
                         &monitored_process.spec.target_cmd,
                         &mem_stats,
                         swap_kb,
                     );
                     process.kill();
-                    return HighMemoryEventResult::KilledDueToHighAnonMemory;
+                    return HighMemoryEventResult::KilledDueToInsufficientReclaim;
                 }
-            } else {
-                return HighMemoryEventResult::NoOpDueToInvalidConfigParsing;
             }
         } else {
-            return HighMemoryEventResult::NoOpDueToDisabledKill;
+            return HighMemoryEventResult::NoOpDueToInvalidConfigParsing;
         }
     } else {
         return HighMemoryEventResult::NoOpDueToInvalidConfigParsing;
