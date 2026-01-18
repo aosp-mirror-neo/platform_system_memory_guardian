@@ -49,6 +49,8 @@ use utils::Process;
 mod watcher;
 use watcher::Watcher;
 
+const HOLD_BACK_AFTER_SUCCESSFUL_RECLAIM_IN_SECONDS: u32 = 300;
+
 // Local error class that collects the different kinds of errors that might be reported.
 #[derive(Error, Debug)]
 enum MyError {
@@ -328,7 +330,13 @@ fn memory_event(
                                 detach_process(t, watcher);
                             }
                             _ => {
-                                info!("not detaching");
+                                info!(
+                                    "Not Detaching, throttling for {} seconds",
+                                    HOLD_BACK_AFTER_SUCCESSFUL_RECLAIM_IN_SECONDS
+                                );
+                                thread::sleep(Duration::from_secs(
+                                    HOLD_BACK_AFTER_SUCCESSFUL_RECLAIM_IN_SECONDS.into(),
+                                ));
                             }
                         }
                     } else {
