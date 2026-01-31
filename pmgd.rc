@@ -24,3 +24,11 @@ on property:sys.boot_completed=1
     # The pmgd service always starts but it will suspend forever if the feature
     # flag is disabled.
     enable pmgd
+
+on post-fs-data
+    mkdir /data/misc/pmgd 0770 system system
+
+    write /data/misc/pmgd/history.json "{}"
+
+    chmod 0660 /data/misc/pmgd/history.json
+    chown system system /data/misc/pmgd/history.json

@@ -34,6 +34,9 @@ mod config;
 use config::Configuration;
 use config::Specification;
 
+mod on_disk_utils;
+use on_disk_utils::get_kill_history;
+
 mod memcg_proc_memory_util;
 use memcg_proc_memory_util::{
     read_cgroup_memory_current_kb, read_cgroup_memory_high_kb, read_cgroup_memory_stat,
@@ -120,15 +123,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         nix::unistd::pause();
     }
 
-    let config = Configuration::load_config();
-    if config.targets.is_empty() {
-        warn!("pmgd found no vendor config in vendor/etc");
+    let mut vendor_config = Configuration::load_config();
+    filter_valid_config_targets(&mut vendor_config);
+    if vendor_config.targets.is_empty() {
+        warn!("The list of config targets is empty");
         nix::unistd::pause();
     }
 
     // Actually monitor the system.
     #[cfg(unix)]
-    if let Err(e) = monitor_processes(&config) {
+    if let Err(e) = monitor_processes(&vendor_config) {
         error!("{}", e)
     }
 
@@ -358,8 +362,8 @@ fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) -> HighMem
         let target_pid = process.pid;
         let mem_stats = read_cgroup_memory_stat(uid, target_pid);
         let swap_kb = read_cgroup_memory_swap_kb(uid, target_pid);
-
-        log_threshold_exceeded(uid as i32, &monitored_process.spec.target_cmd, &mem_stats, swap_kb);
+        let target_cmd = &monitored_process.spec.target_cmd;
+        log_threshold_exceeded(uid as i32, target_cmd, &mem_stats, swap_kb);
 
         let _ = create_perfetto_trace();
 
@@ -377,13 +381,9 @@ fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) -> HighMem
                     "killing pid_{} anon_memory {}mb > limit {}mb",
                     target_pid, anon_memory_in_mb, anon_limit_in_mb
                 );
-                log_anon_memory_breach(
-                    uid as i32,
-                    &monitored_process.spec.target_cmd,
-                    &mem_stats,
-                    swap_kb,
-                );
+                log_anon_memory_breach(uid as i32, target_cmd, &mem_stats, swap_kb);
                 process.kill();
+                record_kill_event(target_cmd);
                 return HighMemoryEventResult::KilledDueToHighAnonMemory;
             } else {
                 info!(
@@ -404,7 +404,7 @@ fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) -> HighMem
                 let mem_high = mem_high_opt.unwrap();
                 let mem_curr = mem_curr_opt.unwrap();
 
-                info!("mem_curr {}mb > mem_high {}mb", mem_curr, mem_high);
+                info!("checking if mem_curr {}mb > mem_high {}mb", mem_curr, mem_high);
                 if mem_curr >= mem_high {
                     warn!(
                         "killing pid_{} mem_curr {}mb >= mem_high {}mb",
@@ -412,13 +412,9 @@ fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) -> HighMem
                     );
                     let mem_stats = read_cgroup_memory_stat(uid, target_pid);
                     let swap_kb = read_cgroup_memory_swap_kb(uid, target_pid);
-                    log_total_memory_breach(
-                        uid as i32,
-                        &monitored_process.spec.target_cmd,
-                        &mem_stats,
-                        swap_kb,
-                    );
+                    log_total_memory_breach(uid as i32, target_cmd, &mem_stats, swap_kb);
                     process.kill();
+                    record_kill_event(target_cmd);
                     return HighMemoryEventResult::KilledDueToInsufficientReclaim;
                 }
             }
@@ -475,5 +471,27 @@ impl fmt::Display for MonitoredProcess {
         } else {
             self.spec.fmt(f)
         }
+    }
+}
+
+// remove any targets that have been killed since a device reboot
+fn filter_valid_config_targets(config: &mut Configuration) {
+    let mut history = get_kill_history().lock().unwrap();
+
+    config.targets.retain(|target_process| {
+        let was_killed_since_reboot = history.was_killed_since_reboot(&target_process.target_cmd);
+
+        if was_killed_since_reboot {
+            info!("Target {} was killed since reboot, filtering out.", target_process.target_cmd);
+        }
+        !was_killed_since_reboot
+    });
+}
+
+fn record_kill_event(process_name: &str) {
+    let mut history = get_kill_history().lock().unwrap();
+    history.record_kill_event(process_name);
+    if let Err(e) = history.save() {
+        error!("Failed to persist kill history: {}", e);
     }
 }
