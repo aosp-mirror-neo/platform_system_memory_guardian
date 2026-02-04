@@ -372,15 +372,43 @@ fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) -> HighMem
             // LINT.ThenChange(HighMemoryEventResult)
             return HighMemoryEventResult::NoOpDueToDisabledKill;
         }
-        if let Some(anon_limit_in_mb) = monitored_process.spec.anon_limit_in_mb {
-            let anon_memory_in_mb = mem_stats.anon_kilobytes / 1024;
-            warn!("pid_{} anon_memory {}/{}mb ", target_pid, anon_memory_in_mb, anon_limit_in_mb);
+        let Some(anon_limit_in_mb) = monitored_process.spec.profile_info.get_anon_limit_mb() else {
+            return HighMemoryEventResult::NoOpDueToInvalidConfigParsing;
+        };
 
-            if anon_memory_in_mb > anon_limit_in_mb {
-                warn!(
-                    "killing pid_{} anon_memory {}mb > limit {}mb",
-                    target_pid, anon_memory_in_mb, anon_limit_in_mb
-                );
+        let anon_memory_in_mb = mem_stats.anon_kilobytes / 1024;
+        warn!("pid_{} anon_memory {}/{}mb ", target_pid, anon_memory_in_mb, anon_limit_in_mb);
+        if anon_memory_in_mb > anon_limit_in_mb {
+            warn!(
+                "killing pid_{} anon_memory {}mb > limit {}mb",
+                target_pid, anon_memory_in_mb, anon_limit_in_mb
+            );
+            log_anon_memory_breach(uid as i32, target_cmd, &mem_stats, swap_kb);
+            process.kill();
+            record_kill_event(target_cmd);
+            return HighMemoryEventResult::KilledDueToHighAnonMemory;
+        } else {
+            info!(
+                "Waiting for memory reclaim for {} seconds",
+                monitored_process.spec.reclaim_wait_time_secs
+            );
+            thread::sleep(Duration::from_secs(
+                monitored_process.spec.reclaim_wait_time_secs.into(),
+            ));
+
+            let mem_high_opt = read_cgroup_memory_high_kb(uid, target_pid);
+            let mem_curr_opt = read_cgroup_memory_current_kb(uid, target_pid);
+
+            if mem_high_opt.is_none() || mem_curr_opt.is_none() {
+                error!("Failed to read cgroup memory values for pid_{}", target_pid);
+                return HighMemoryEventResult::NoOpDueToFailedCgroupRead;
+            }
+            let mem_high = mem_high_opt.unwrap();
+            let mem_curr = mem_curr_opt.unwrap();
+
+            info!("mem_curr {}mb > mem_high {}mb", mem_curr, mem_high);
+            if mem_curr >= mem_high {
+                warn!("checking if mem_curr {}mb >= mem_high {}mb", mem_curr, mem_high);
                 log_anon_memory_breach(uid as i32, target_cmd, &mem_stats, swap_kb);
                 process.kill();
                 record_kill_event(target_cmd);
@@ -418,8 +446,6 @@ fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) -> HighMem
                     return HighMemoryEventResult::KilledDueToInsufficientReclaim;
                 }
             }
-        } else {
-            return HighMemoryEventResult::NoOpDueToInvalidConfigParsing;
         }
     } else {
         return HighMemoryEventResult::NoOpDueToInvalidConfigParsing;

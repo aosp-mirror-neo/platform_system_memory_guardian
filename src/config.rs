@@ -52,14 +52,18 @@ impl Configuration {
             Err(e) => {
                 error!("failed to read {}: {}", vendor_config_path, e);
                 if !pmgd_flags::memory_guardian_uses_vendor_config() {
+                    let profile_info = ProfileConfig::LegacyBoth {
+                        mem_limit_profile: "SystemServerMemoryHighLimitP99".to_string(),
+                        additional_task_profiles: None,
+                        anon_limit_in_mb: None,
+                    };
+
                     Self {
                         targets: vec![Specification {
                             target_cmd: "system_server".to_string(),
                             uid: Some(1000),
-                            mem_limit_profile: "SystemServerMemoryHighLimitP99".to_string(),
-                            anon_limit_in_mb: None,
-                            additional_task_profiles: None,
                             reclaim_wait_time_secs: default_reclaim_wait_time(),
+                            profile_info,
                         }],
                     }
                 } else {
@@ -78,13 +82,58 @@ impl Configuration {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Specification {
     pub target_cmd: String,
-    pub mem_limit_profile: String,
     pub uid: Option<u32>,
-    pub anon_limit_in_mb: Option<u32>,
-    pub additional_task_profiles: Option<Vec<String>>,
 
     #[serde(default = "default_reclaim_wait_time")]
     pub reclaim_wait_time_secs: u32,
+
+    #[serde(flatten)]
+    pub profile_info: ProfileConfig,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+pub enum ProfileConfig {
+    // Deprecate after memory_guardian_uses_vendor_config
+    Both {
+        mem_limit_profile: String,
+        additional_task_profiles: Vec<String>,
+        anon_limit_in_mb: u32,
+    },
+    LegacyBoth {
+        mem_limit_profile: String,
+        additional_task_profiles: Option<Vec<String>>,
+        anon_limit_in_mb: Option<u32>,
+    },
+    MemoryLimitOnly {
+        mem_limit_profile: String,
+        anon_limit_in_mb: u32,
+    },
+    ProfilesWithoutMemoryLimit {
+        additional_task_profiles: Vec<String>,
+    },
+}
+
+impl ProfileConfig {
+    pub fn get_mem_limit_profile(&self) -> Option<String> {
+        match self {
+            Self::LegacyBoth { mem_limit_profile, .. }
+            | Self::Both { mem_limit_profile, .. }
+            | Self::MemoryLimitOnly { mem_limit_profile, .. } => {
+                Some(mem_limit_profile.to_string())
+            }
+            _ => None,
+        }
+    }
+
+    pub fn get_anon_limit_mb(&self) -> Option<u32> {
+        match self {
+            Self::Both { anon_limit_in_mb, .. }
+            | Self::MemoryLimitOnly { anon_limit_in_mb, .. } => Some(*anon_limit_in_mb),
+            Self::LegacyBoth { anon_limit_in_mb, .. } => *anon_limit_in_mb,
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for Specification {

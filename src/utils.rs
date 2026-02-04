@@ -15,7 +15,7 @@
 //! pmgd (process memory guardian) is a native daemon monitoring memcg memory for a process.
 //! This module contains system-specific utilities.
 
-use log::{error, info};
+use log::error;
 use nix::libc::c_int;
 use processgroup::processgroup;
 use std::fmt;
@@ -82,16 +82,14 @@ impl Process {
         }
     }
 
-    // Assign a task profile to a process.  Return true for success.
+    // Assign the target spec's mem limit profile.  Return true for success.
     pub fn assign_profile(&self, spec: &Specification) -> bool {
-        // An empty profile list only appears during development and testing.  Treat it as
-        // success.
-        if spec.mem_limit_profile.is_empty() {
-            info!("no profile on {}", spec.target_cmd);
-            return true;
-        }
+        let Some(profile_str) = spec.profile_info.get_mem_limit_profile() else {
+            return false;
+        };
+
         let pid: i32 = self.pid.try_into().unwrap();
-        let plist: Vec<&str> = vec![spec.mem_limit_profile.as_str()];
+        let plist: Vec<&str> = vec![&profile_str];
         match processgroup::set_process_profiles(self.uid, pid, &plist) {
             Ok(_) => true,
             Err(e) => {
