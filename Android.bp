@@ -41,19 +41,10 @@ rust_defaults {
     ],
 }
 
-genrule {
-    name: "pmgd_statslog_rust_gen",
-    tools: ["stats-log-api-gen"],
-    cmd: "$(location stats-log-api-gen) --module pmgd" +
-        " --rustHeaderCrate statslog_rust_header --rust $(genDir)/statslog_pmgd.rs",
-    out: ["statslog_pmgd.rs"],
-}
-
 rust_library {
     name: "libpmgd_statslog",
     srcs: [
         "src/statslog_wrapper.rs",
-        ":pmgd_statslog_rust_gen",
     ],
     crate_name: "pmgd_statslog",
     rustlibs: [
