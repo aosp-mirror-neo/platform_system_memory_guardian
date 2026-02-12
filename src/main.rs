@@ -358,7 +358,8 @@ fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) -> HighMem
     atrace::trace_method!(AtraceTag::ActivityManager);
     monitored_process.handled = true;
 
-    if let (Some(process), Some(uid)) = (&monitored_process.process, monitored_process.spec.uid) {
+    if let Some(process) = &monitored_process.process {
+        let uid = process.uid;
         let target_pid = process.pid;
         let mem_stats = read_cgroup_memory_stat(uid, target_pid);
         let swap_kb = read_cgroup_memory_swap_kb(uid, target_pid);
