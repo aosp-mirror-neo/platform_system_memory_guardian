@@ -15,7 +15,7 @@
 //! pmgd (process memory guardian) is a native daemon monitoring memcg memory for a process.
 
 use atrace::AtraceTag;
-use inotify::{EventMask, WatchDescriptor, WatchMask};
+use inotify::{EventMask, WatchDescriptor};
 use log::{error, info, warn, LevelFilter};
 use nix::poll::PollTimeout;
 use nix::sys::epoll::EpollEvent;
@@ -36,6 +36,10 @@ use config::Specification;
 
 mod on_disk_utils;
 use on_disk_utils::get_kill_history;
+
+mod monitored_processes;
+use monitored_processes::MonitoredProcess;
+use monitored_processes::MonitoredProcesses;
 
 mod memcg_proc_memory_util;
 use memcg_proc_memory_util::{
@@ -94,22 +98,6 @@ struct TargetMonitor {
     high_events: u64,
 }
 
-// The MonitoredProcess contains: its specification and its process.  The process is optional, because
-// the process might not exist.  The monitor is option; it exists only if processes are being
-// monitored for heap dumps.  The structure includes three flags:
-//  found - the process was found and profiles were configured.
-//  handled - a memory event has been seen on this process; no further monitoring
-//  ignore - the process specification is invalid; do not try to use it
-// The proc field may be empty while found is true if handled is true.
-struct MonitoredProcess {
-    spec: Specification,
-    process: Option<Process>,
-    monitor: Option<TargetMonitor>,
-    found: bool,
-    handled: bool,
-    ignore: bool,
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
     let _init_success = logger::init(
         logger::Config::default().with_tag_on_device("pmgd").with_max_level(LevelFilter::Trace),
@@ -147,29 +135,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 // Monitor the process list.
 fn monitor_processes(config: &Configuration) -> MyResult<()> {
-    let target_specs = &config.targets;
-
-    // Construct the target state, one for every specification.
-    let mut targets: Vec<MonitoredProcess> = Vec::new();
-    for t in target_specs {
-        targets.push(MonitoredProcess {
-            spec: t.clone(),
-            process: None,
-            monitor: None,
-            found: false,
-            handled: false,
-            ignore: false,
-        });
-    }
-
+    let mut monitored_processes = MonitoredProcesses::from(config);
     let mut watcher = Watcher::new()?;
 
     // Buffer for received epoll events.
     let mut events = vec![EpollEvent::empty(); 10];
 
     // Update the process list once, before the loop.
-    update_processes(&mut targets, &mut watcher);
-    if !any_active(&targets) {
+    monitored_processes.update_processes(&mut watcher);
+    if !monitored_processes.any_active() {
         return Ok(());
     }
 
@@ -178,131 +152,22 @@ fn monitor_processes(config: &Configuration) -> MyResult<()> {
     // The monitor loop.  Update processes and then wait for events.
     while let Ok(num_events) = watcher.wait(&mut events, PollTimeout::NONE) {
         if num_events > 0 {
+            let processes_to_update = monitored_processes.get_processes_to_update();
             let _ = atrace::begin_scoped_event(AtraceTag::ActivityManager, "memory_events");
             if let Ok(events) = watcher.inotify.read_events(&mut buffer) {
                 for e in events {
-                    memory_event(e, &mut targets, &mut watcher);
+                    memory_event(e, processes_to_update, &mut watcher);
                 }
             }
         }
-        update_processes(&mut targets, &mut watcher);
-        if !any_active(&targets) {
+        monitored_processes.update_processes(&mut watcher);
+
+        if !monitored_processes.any_active() {
             break;
         }
     }
 
     Ok(())
-}
-
-// Update the process information for a list of targets.  Return true if there are any active
-// processes.
-fn update_processes(targets: &mut Vec<MonitoredProcess>, watch: &mut Watcher) {
-    atrace::trace_method!(AtraceTag::ActivityManager);
-
-    for t in targets {
-        if t.ignore {
-            // The process was specified with an invalid task profile and is not properly
-            // configured.
-            continue;
-        }
-
-        // Check if a target we found earlier is still valid.
-        if let Some(process) = &t.process {
-            if !process.is_alive() {
-                info!("dropping {}", t.spec.target_cmd);
-                detach_process(t, watch);
-            }
-        }
-
-        // This block is hit if the target was not known when the function was entered, or if
-        // the previously recorded process exited.
-        if !t.found {
-            if let Ok(p) = Process::from(&t.spec) {
-                let key = format!("{} - {}", t.spec.target_cmd, p);
-                if !p.assign_profile(&t.spec) {
-                    warn!("failed to configure {} - ignoring", key);
-                    t.process = None;
-                    t.ignore = true;
-                    continue;
-                }
-                if watch.add_process(&p).is_err() {
-                    warn!("failed to watch {} - ignoring", key);
-                    t.process = None;
-                    t.ignore = true;
-                    continue;
-                }
-                info!("acquired {}", key);
-                t.process = Some(p);
-                t.found = true;
-
-                if !t.handled {
-                    // Attach for monitoring if the daemon has not seen any previous memory
-                    // events.
-                    if let Some(p) = &t.process {
-                        t.monitor = attach_process(p, watch);
-                    }
-                    if t.monitor.is_some() {
-                        info!("attached {}", key);
-                    } else {
-                        // The process could not be monitored.
-                        warn!("not monitoring {}", key);
-                    }
-                } else {
-                    info!("found {} already handled", key);
-                }
-            }
-        }
-    }
-}
-
-// Return true if there are any active processes left to monitor or configure.
-fn any_active(targets: &Vec<MonitoredProcess>) -> bool {
-    for t in targets {
-        if !t.ignore {
-            return true;
-        }
-    }
-    false
-}
-
-// Given a Process, create a TargetProcess.  If heap dumps are desired, the process is also
-// monitored.
-fn attach_process(proc: &Process, watcher: &mut Watcher) -> Option<TargetMonitor> {
-    let epath = proc.events_path();
-
-    let start = match read_memory_high(&epath) {
-        Ok(h) => h,
-        Err(e) => {
-            error!("failed to read {}: {}", epath, e);
-            watcher.delete_process(proc);
-            return None;
-        }
-    };
-
-    let desc = match watcher.add_path(&epath, WatchMask::MODIFY) {
-        Ok(d) => d,
-        Err(_) => {
-            watcher.delete_process(proc);
-            return None;
-        }
-    };
-
-    Some(TargetMonitor { events_path: epath, events_wd: desc, high_events: start })
-}
-
-// Detach a process that was successfully attached.
-fn detach_process(target: &mut MonitoredProcess, watch: &mut Watcher) {
-    atrace::trace_method!(AtraceTag::ActivityManager);
-    if let Some(p) = &target.process {
-        info!("detaching {} - {}", target.spec.target_cmd, p);
-        if let Some(m) = &target.monitor {
-            watch.remove_path(m.events_wd.clone());
-        }
-        watch.delete_process(p);
-        target.found = false;
-        target.monitor = None;
-        target.process = None;
-    }
 }
 
 // Process a single inotify event.
@@ -318,6 +183,7 @@ fn memory_event(
         return;
     }
 
+    // TODO: Abstract processes.find_process_with_fired_event(fired)
     let fired = e.wd;
     for t in &mut *targets {
         if let Some(proc) = &mut t.monitor {
@@ -329,9 +195,11 @@ fn memory_event(
                         t.spec.target_cmd, new_high, proc.high_events
                     );
                     if new_high > proc.high_events {
+                        // Ensure high events are updated
+                        proc.high_events = new_high;
                         match handle_memory_high_event(t) {
                             res if res != HighMemoryEventResult::ReclaimSuccessful => {
-                                detach_process(t, watcher);
+                                t.detach_process(watcher);
                             }
                             _ => {
                                 info!(
@@ -356,14 +224,15 @@ fn memory_event(
 // does nothing if the process has been handled once already.
 fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) -> HighMemoryEventResult {
     atrace::trace_method!(AtraceTag::ActivityManager);
-    monitored_process.handled = true;
+    monitored_process.mark_as_handled();
 
     if let Some(process) = &monitored_process.process {
         let uid = process.uid;
         let target_pid = process.pid;
         let mem_stats = read_cgroup_memory_stat(uid, target_pid);
         let swap_kb = read_cgroup_memory_swap_kb(uid, target_pid);
-        let target_cmd = &monitored_process.spec.target_cmd;
+        let target_cmd = monitored_process.get_target_cmd();
+
         log_threshold_exceeded(uid as i32, target_cmd, &mem_stats, swap_kb);
 
         let _ = create_perfetto_trace();
@@ -373,7 +242,8 @@ fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) -> HighMem
             // LINT.ThenChange(HighMemoryEventResult)
             return HighMemoryEventResult::NoOpDueToDisabledKill;
         }
-        let Some(anon_limit_in_mb) = monitored_process.spec.profile_info.get_anon_limit_mb() else {
+
+        let Some(anon_limit_in_mb) = monitored_process.get_profile_anon_limit() else {
             return HighMemoryEventResult::NoOpDueToInvalidConfigParsing;
         };
 
@@ -389,13 +259,9 @@ fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) -> HighMem
             record_kill_event(target_cmd);
             return HighMemoryEventResult::KilledDueToHighAnonMemory;
         } else {
-            info!(
-                "Waiting for memory reclaim for {} seconds",
-                monitored_process.spec.reclaim_wait_time_secs
-            );
-            thread::sleep(Duration::from_secs(
-                monitored_process.spec.reclaim_wait_time_secs.into(),
-            ));
+            let reclaim_time_secs = monitored_process.get_spec_reclaim_wait_time_secs();
+            info!("Waiting for memory reclaim for {} seconds", reclaim_time_secs);
+            thread::sleep(Duration::from_secs(reclaim_time_secs.into()));
 
             let mem_high_opt = read_cgroup_memory_high_kb(uid, target_pid);
             let mem_curr_opt = read_cgroup_memory_current_kb(uid, target_pid);
@@ -407,7 +273,6 @@ fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) -> HighMem
             let mem_high = mem_high_opt.unwrap();
             let mem_curr = mem_curr_opt.unwrap();
 
-            info!("mem_curr {}mb > mem_high {}mb", mem_curr, mem_high);
             if mem_curr >= mem_high {
                 warn!("checking if mem_curr {}mb >= mem_high {}mb", mem_curr, mem_high);
                 log_anon_memory_breach(uid as i32, target_cmd, &mem_stats, swap_kb);
@@ -415,13 +280,8 @@ fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) -> HighMem
                 record_kill_event(target_cmd);
                 return HighMemoryEventResult::KilledDueToHighAnonMemory;
             } else {
-                info!(
-                    "Waiting for memory reclaim for {} seconds",
-                    monitored_process.spec.reclaim_wait_time_secs
-                );
-                thread::sleep(Duration::from_secs(
-                    monitored_process.spec.reclaim_wait_time_secs.into(),
-                ));
+                info!("Waiting for memory reclaim for {} seconds", reclaim_time_secs);
+                thread::sleep(Duration::from_secs(reclaim_time_secs.into()));
 
                 let mem_high_opt = read_cgroup_memory_high_kb(uid, target_pid);
                 let mem_curr_opt = read_cgroup_memory_current_kb(uid, target_pid);
