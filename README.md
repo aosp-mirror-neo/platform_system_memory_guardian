@@ -20,7 +20,7 @@ The daemon listens for memory pressure events (specifically high-memory activity
 
 ## Configuration
 
-`pmgd` configuration is vendor-driven, and is a json file that is required in `/vendor/etc/config.json`. This lists the processes to trace, their configured memory limit profile (using [cgroup task profiles](https://source.android.com/docs/core/perf/cgroups#example-task-profiles-json-file)), and the hard anonymous memory limit in megabytes.
+`pmgd` configuration is vendor-driven, configured by a json file that is required: `/vendor/etc/pmgd/config.json`. This lists the processes to trace, their configured memory limit profile (using [cgroup task profiles](https://source.android.com/docs/core/perf/cgroups#example-task-profiles-json-file)), and the hard anonymous memory limit in megabytes.
 
 ### Vendor Configuration Fields
 
