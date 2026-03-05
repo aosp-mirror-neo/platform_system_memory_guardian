@@ -8,30 +8,34 @@ processes, taking action when memory usage exceeds configured limits.
 
 ## Background
 
-pmgd introduces a granular, per-process approach on memory enforcement. It
+pmgd introduces a granular, per-process approach to memory enforcement. It
 allows defining specific memory ceilings for targeted processes and gracefully
 handling limit violations by collecting debugging information (like Perfetto
 heap dumps) prior to process termination. This targeted execution prevents
 misbehaving processes from destabilizing the system while providing actionable
 diagnostic data.
 
-## pmgd process
+## Execution Flow
 
 The daemon listens for memory pressure events (specifically high-memory activity
 via `memory.events`) using `inotify`. When a monitored process triggers a memory
-event, `pmgd` performs following actions:
+event, `pmgd` performs the following actions:
 
 1.  **Heap Dump Collection**: Triggers a Perfetto Java heap dump using the
-    configuration defined in `heap_dump.cfg`.
-1.  **Memory Enforcement (Kill Policy)**:
-    -   **High Anonymous Memory**: If the anonymous memory of the process
+    configuration defined in `/vendor/etc/pmgd/heap_dump.cfg`.
+
+2.  **Memory Enforcement (Kill Policy)**:
+
+    *   **High Anonymous Memory**: If the anonymous memory of the process
         exceeds the configured `anon_limit_in_mb`, the process is killed
         immediately.
-    -   **Insufficient Reclaim**: If anonymous memory is within bounds, `pmgd`
+
+    *   **Insufficient Reclaim**: If anonymous memory is within bounds, `pmgd`
         waits for a specific reclaim period (`reclaim_wait_time_secs`). If the
         process's `memory.current` remains greater than or equal to
         `memory.high` after this grace period, it is killed.
-1.  **Reboot Rate Limiting**: To prevent boot loops or persistent crashes,
+
+3.  **Reboot Rate Limiting**: To prevent boot loops or persistent crashes,
     `pmgd` tracks process kills in `/data/misc/pmgd/history.json`. Processes are
     restricted to one `pmgd`-initiated kill per device reboot.
 
@@ -45,26 +49,26 @@ and the hard anonymous memory limit in megabytes.
 
 ### Vendor Configuration Fields
 
-The json provided configuration will be a list processes and their limits,
+The json provided configuration will be a list of processes and their limits,
 defined by the following fields:
 
--   `target_cmd` (String, required): The command name of the target process to
+*   `target_cmd` (String, required): The command name of the target process to
     be monitored (e.g., `"system_server"`).
--   `uid` (Integer, optional): The user ID (UID) of the process. If omitted,
-    `pmgd` will look for any process matching `target_cmd`.
--   `reclaim_wait_time_secs` (Integer, optional): The grace period in seconds to
+*   `uid` (Integer, optional): The user ID (UID) of the process. If omitted,
+    `pmgd` will apply the rule globally to any process matching `target_cmd`.
+*   `reclaim_wait_time_secs` (Integer, optional): The grace period in seconds to
     wait for the memory to be reclaimed before evaluating the memory limit
     again. Defaults to `5` if omitted.
--   `mem_limit_profile` (String, required): The task profile mapped to specific
+*   `mem_limit_profile` (String, required): The task profile mapped to specific
     memory limits for the target (e.g., `"SystemServerMemoryHighLimit"`).
--   `anon_limit_in_mb` (Integer, required): The ultimate anonymous memory limit
+*   `anon_limit_in_mb` (Integer, required): The ultimate anonymous memory limit
     in megabytes. If the anonymous memory utilization surpasses this value, the
     process is promptly killed.
--   `additional_task_profiles` (List of Strings, optional): A list of any
+*   `additional_task_profiles` (List of Strings, optional): A list of any
     additional task profiles that should be applied to the process when
     monitoring starts.
 
-Example profile:
+Example profile (`/vendor/etc/pmgd/config.json`):
 
 ```json
 {
