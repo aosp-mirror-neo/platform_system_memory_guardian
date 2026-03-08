@@ -46,7 +46,7 @@ impl Configuration {
     }
 
     pub fn load_config() -> Self {
-        let vendor_config_path = "/vendor/etc/config.json";
+        let vendor_config_path = "/vendor/etc/pmgd/config.json";
         match Self::load_config_from_path(vendor_config_path) {
             Ok(config) => config,
             Err(e) => {
