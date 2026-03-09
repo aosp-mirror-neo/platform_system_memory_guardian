@@ -235,7 +235,7 @@ fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) -> HighMem
 
         log_threshold_exceeded(uid as i32, target_cmd, &mem_stats, swap_kb);
 
-        let _ = create_perfetto_trace();
+        let _ = create_perfetto_trace(target_cmd);
 
         // LINT.IfChange
         if !pmgd_flags::process_kill_enabled() {
@@ -314,11 +314,13 @@ fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) -> HighMem
     HighMemoryEventResult::ReclaimSuccessful
 }
 
-fn create_perfetto_trace() -> io::Result<()> {
+fn create_perfetto_trace(target_cmd: &str) -> io::Result<()> {
     let trace_template = include_str!("../heap_dump.cfg");
 
     let random_msb: u32 = rand::thread_rng().gen();
-    let trace_config = trace_template.replace("TARGET_MSB", &random_msb.to_string());
+    let trace_config = trace_template
+        .replace("TARGET_MSB", &random_msb.to_string())
+        .replace("TARGET_CMDLINE", target_cmd);
 
     let args = vec!["-c", "-", "--txt", "--upload"];
 
