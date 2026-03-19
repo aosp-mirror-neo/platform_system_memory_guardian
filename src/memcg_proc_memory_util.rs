@@ -19,11 +19,15 @@ use anyhow::{anyhow, Context, Result};
 use atrace::AtraceTag;
 use log::error;
 use regex::Regex;
-use std::fs;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::path::PathBuf;
+
+#[cfg(not(test))]
+use crate::os_api::FsApiImpl as FsApi;
+#[cfg(test)]
+use crate::os_api::MockFsApi as FsApi;
+
+use crate::os_api::FsApi as _;
 
 pub struct CgroupMemStat {
     pub anon_kilobytes: u32,
@@ -43,13 +47,15 @@ pub fn read_cgroup_memory_stat_path(uid: u32, pid: u32) -> PathBuf {
 }
 
 fn read_cgroup_file_as_u64(path: &Path) -> Option<u64> {
-    fs::read_to_string(path).ok().and_then(|s| s.trim().parse::<u64>().ok())
+    FsApi::read_to_string(path.to_str().unwrap_or(""))
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
 }
 
 // Read the memory high count from the events file.
 pub fn read_memory_high(path: &str) -> Result<u64> {
     atrace::trace_method!(AtraceTag::ActivityManager);
-    let stats = fs::read_to_string(path)?;
+    let stats = FsApi::read_to_string(path).map_err(|e| anyhow::anyhow!(e))?;
     let high_re = Regex::new(r"high\s+(\d+)").context("Failed to compile memory.high regex")?;
 
     if let Some(captures) = high_re.captures(&stats) {
@@ -94,9 +100,8 @@ pub fn read_cgroup_memory_stat(uid: u32, pid: u32) -> CgroupMemStat {
 
     let mut stats = CgroupMemStat { anon_kilobytes: 0, file_kilobytes: 0 };
 
-    if let Ok(file) = File::open(path) {
-        let reader = BufReader::new(file);
-        for line in reader.lines().map_while(Result::ok) {
+    if let Ok(content) = FsApi::read_to_string(path.to_str().unwrap_or("")) {
+        for line in content.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
 
             if parts.len() >= 2 {

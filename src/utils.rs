@@ -17,20 +17,23 @@
 
 use log::error;
 use nix::libc::c_int;
-use processgroup::processgroup;
 use std::fmt;
 use std::fs;
-use std::fs::DirEntry;
 use std::os::fd::{FromRawFd, OwnedFd};
-use std::path::Path;
+
+#[cfg(not(test))]
+use crate::os_api::FsApiImpl as FsApi;
+#[cfg(test)]
+use crate::os_api::MockFsApi as FsApi;
+
+use crate::os_api::FsApi as _;
+use crate::os_api::ProcessGroupApi;
 
 use super::config::Specification;
 use super::MyError;
 use super::MyResult;
 
 #[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
-
 extern "C" {
     fn pidfd_open(pid: c_int, flags: c_int) -> c_int;
 }
@@ -68,10 +71,10 @@ impl Process {
     }
 
     // Kill a process group.  The command parameter is used only for error logging.
-    pub fn kill(&self) -> bool {
+    pub fn kill<P: ProcessGroupApi>(&self) -> bool {
         let kill_signal: c_int = 9;
         let pid: i32 = self.pid.try_into().unwrap();
-        match processgroup::kill_process_group(self.uid, pid, kill_signal) {
+        match P::kill_process_group(self.uid, pid, kill_signal) {
             Ok(_) => true,
             Err(e) => {
                 // kill_process_group seems to successfully kill the target process but it then
@@ -83,14 +86,14 @@ impl Process {
     }
 
     // Assign the target spec's mem limit profile.  Return true for success.
-    pub fn assign_profile(&self, spec: &Specification) -> bool {
+    pub fn assign_profile<P: ProcessGroupApi>(&self, spec: &Specification) -> bool {
         let Some(profile_str) = spec.profile_info.get_mem_limit_profile() else {
             return false;
         };
 
         let pid: i32 = self.pid.try_into().unwrap();
-        let plist: Vec<&str> = vec![&profile_str];
-        match processgroup::set_process_profiles(self.uid, pid, &plist) {
+        let plist = vec![profile_str.to_string()];
+        match P::set_process_profiles(self.uid, pid, plist) {
             Ok(_) => true,
             Err(e) => {
                 error!("failed to set profiles on {} {}: {}", spec.target_cmd, pid, e);
@@ -103,14 +106,9 @@ impl Process {
     // the matching cmdline.  If the uid is known, it may be specified, which tightens up the
     // security of the search.  Command line matching ignores trailing white space.
     pub fn from(spec: &Specification) -> MyResult<Self> {
-        let proc_path = Path::new("/proc");
-        if !proc_path.is_dir() {
-            return Err(MyError::Application { msg: "failed to open /proc".into() });
-        }
-
-        let listing = fs::read_dir(proc_path)?;
-        for entry in listing.flatten() {
-            if let Ok(pid) = Self::is_process(entry, spec) {
+        let names = FsApi::list_dir("/proc")?;
+        for name in names {
+            if let Ok(pid) = Self::is_process(&name, spec) {
                 return Ok(pid);
             }
         }
@@ -121,21 +119,12 @@ impl Process {
     }
 
     // If the /proc directory entry matches the uid, and command line, return the pid and uid.
-    fn is_process(entry: DirEntry, target_spec: &Specification) -> MyResult<Self> {
-        // Examine the directory entry.  The name must be valid unicode and, it must be an integer.
-        // The entry must identify a directory.
-        let os_name = entry.file_name();
-        let name = os_name.to_str().ok_or(MyError::NotFound)?;
-        let process_pid = name.parse()?;
-
-        let file_type = entry.file_type().map_err(|_| MyError::NotFound)?;
-        if !file_type.is_dir() {
-            return Err(MyError::NotFound);
-        }
+    fn is_process(name: &str, target_spec: &Specification) -> MyResult<Self> {
+        let process_pid: u32 = name.parse().map_err(|_| MyError::NotFound)?;
 
         // Capture the uid.
-        let meta = fs::metadata(entry.path())?;
-        let process_uid = meta.uid();
+        let path = format!("/proc/{}", name);
+        let process_uid = FsApi::get_uid(&path).map_err(|_| MyError::NotFound)?;
 
         // If there is a target_spec uid, match it now.
         if let Some(want_uid) = target_spec.uid {
@@ -144,10 +133,9 @@ impl Process {
             }
         }
 
-        // Compare the command line.  The cmdline file is fixed-width, padded with nulls.  The nulls
-        // are discarded before comparing.
+        // Compare the command line.
         let cpath = format!("/proc/{}/cmdline", process_pid);
-        let cmdline = fs::read_to_string(&cpath)?;
+        let cmdline = FsApi::read_to_string(&cpath)?;
         if Self::trim_nulls(&cmdline) == target_spec.target_cmd {
             let pfd = Self::pid_fd(process_pid).ok();
             Ok(Process { pid: process_pid, uid: process_uid, cmd_path: cpath, pfd })
