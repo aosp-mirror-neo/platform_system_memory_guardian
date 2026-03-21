@@ -100,14 +100,14 @@ pub enum ProfileConfig {
         additional_task_profiles: Vec<String>,
         anon_limit_in_mb: u32,
     },
+    MemoryLimitOnly {
+        mem_limit_profile: String,
+        anon_limit_in_mb: u32,
+    },
     LegacyBoth {
         mem_limit_profile: String,
         additional_task_profiles: Option<Vec<String>>,
         anon_limit_in_mb: Option<u32>,
-    },
-    MemoryLimitOnly {
-        mem_limit_profile: String,
-        anon_limit_in_mb: u32,
     },
     ProfilesWithoutMemoryLimit {
         additional_task_profiles: Vec<String>,
@@ -144,4 +144,105 @@ impl fmt::Display for Specification {
 
 fn default_reclaim_wait_time() -> u32 {
     5
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_load_config_valid() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"{{
+                "targets": [
+                    {{
+                        "target_cmd": "system_server",
+                        "uid": 1000,
+                        "reclaim_wait_time_secs": 20,
+                        "mem_limit_profile": "SystemServerLimit",
+                        "additional_task_profiles": ["Profile1"],
+                        "anon_limit_in_mb": 100
+                    }}
+                ]
+            }}"#
+        )
+        .unwrap();
+
+        let config = Configuration::load_config_from_path(file.path()).unwrap();
+        assert_eq!(config.targets.len(), 1);
+        assert_eq!(config.targets[0].target_cmd, "system_server");
+        assert_eq!(config.targets[0].uid, Some(1000));
+        assert_eq!(config.targets[0].reclaim_wait_time_secs, 20);
+    }
+
+    #[test]
+    fn test_load_config_missing_target_cmd() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"{{
+                "targets": [
+                    {{
+                        "uid": 1000,
+                        "reclaim_wait_time_secs": 20,
+                        "mem_limit_profile": "SystemServerLimit",
+                        "additional_task_profiles": ["Profile1"],
+                        "anon_limit_in_mb": 100
+                    }}
+                ]
+            }}"#
+        )
+        .unwrap();
+
+        let err = Configuration::load_config_from_path(file.path()).unwrap_err();
+
+        let err_msg = format!("{:#}", err);
+        assert!(err_msg.contains("missing field") && err_msg.contains("target_cmd"));
+    }
+
+    #[test]
+    fn test_deserialize_specification_with_defaults() {
+        // matches `ProfileConfig::MemoryLimitOnly`.
+        let json_data = r#"{
+            "target_cmd": "com.android.systemui",
+            "uid": 1000,
+            "mem_limit_profile": "SystemUIProfile",
+            "anon_limit_in_mb": 150
+        }"#;
+
+        let spec: Specification = serde_json::from_str(json_data).unwrap();
+
+        assert_eq!(spec.reclaim_wait_time_secs, 5); // Default applied
+
+        if let ProfileConfig::MemoryLimitOnly { mem_limit_profile, anon_limit_in_mb } =
+            spec.profile_info
+        {
+            assert_eq!(mem_limit_profile, "SystemUIProfile");
+            assert_eq!(anon_limit_in_mb, 150);
+        } else {
+            panic!("Parsed into wrong ProfileConfig variant!");
+        }
+    }
+
+    #[test]
+    fn test_deserialize_profile_config_both() {
+        // matches `ProfileConfig::Both`.
+        let json_data = r#"{
+            "target_cmd": "my_app",
+            "reclaim_wait_time_secs": 10,
+            "mem_limit_profile": "HeavyProfile",
+            "additional_task_profiles": ["TaskA", "TaskB"],
+            "anon_limit_in_mb": 300
+        }"#;
+
+        let spec: Specification = serde_json::from_str(json_data).unwrap();
+
+        assert_eq!(spec.reclaim_wait_time_secs, 10);
+
+        assert!(matches!(spec.profile_info, ProfileConfig::Both { .. }));
+    }
 }

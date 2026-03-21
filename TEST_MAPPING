@@ -1,0 +1,7 @@
+{
+  "postsubmit": [
+    {
+      "name": "pmgd_unit_tests"
+    }
+  ]
+}
