@@ -80,5 +80,6 @@ rust_test {
     auto_gen_config: true,
     rustlibs: [
         "libtempfile",
+        "libmockall",
     ],
 }

@@ -77,8 +77,7 @@ impl MonitoredProcesses {
                 if let Ok(p) = Process::from(&t.spec) {
                     let key = format!("{} - {}", t.spec.target_cmd, p);
 
-                    // TODO: Encapsulate p.assign_profile/add_watcher_to_process
-                    if !p.assign_profile(&t.spec) {
+                    if !p.assign_profile::<crate::os_api::ProcessGroupApiImpl>(&t.spec) {
                         warn!("failed to configure {} - ignoring", key);
                         t.process = None;
                         t.ignore = true;

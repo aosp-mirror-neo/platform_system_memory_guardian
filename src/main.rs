@@ -34,8 +34,14 @@ mod config;
 use config::Configuration;
 use config::Specification;
 
+mod os_api;
+use os_api::ProcessGroupApi;
+use os_api::ProcessGroupApiImpl;
 mod on_disk_utils;
-use on_disk_utils::get_kill_history;
+use crate::on_disk_utils::get_kill_history;
+
+#[cfg(test)]
+mod integration_tests;
 
 mod monitored_processes;
 use monitored_processes::MonitoredProcess;
@@ -197,7 +203,7 @@ fn memory_event(
                     if new_high > proc.high_events {
                         // Ensure high events are updated
                         proc.high_events = new_high;
-                        match handle_memory_high_event(t) {
+                        match handle_memory_high_event::<ProcessGroupApiImpl>(t) {
                             res if res != HighMemoryEventResult::ReclaimSuccessful => {
                                 t.detach_process(watcher);
                             }
@@ -222,7 +228,9 @@ fn memory_event(
 
 // Handle a high-memory event.  A heap dump is triggered and the process is killed.  This method
 // does nothing if the process has been handled once already.
-fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) -> HighMemoryEventResult {
+fn handle_memory_high_event<P: ProcessGroupApi>(
+    monitored_process: &mut MonitoredProcess,
+) -> HighMemoryEventResult {
     atrace::trace_method!(AtraceTag::ActivityManager);
     monitored_process.mark_as_handled();
 
@@ -255,7 +263,7 @@ fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) -> HighMem
                 target_pid, anon_memory_in_mb, anon_limit_in_mb
             );
             log_anon_memory_breach(uid as i32, target_cmd, &mem_stats, swap_kb);
-            process.kill();
+            process.kill::<P>();
             record_kill_event(target_cmd);
             return HighMemoryEventResult::KilledDueToHighAnonMemory;
         } else {
@@ -276,7 +284,7 @@ fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) -> HighMem
             if mem_curr >= mem_high {
                 warn!("checking if mem_curr {}mb >= mem_high {}mb", mem_curr, mem_high);
                 log_anon_memory_breach(uid as i32, target_cmd, &mem_stats, swap_kb);
-                process.kill();
+                process.kill::<P>();
                 record_kill_event(target_cmd);
                 return HighMemoryEventResult::KilledDueToHighAnonMemory;
             } else {
@@ -302,7 +310,7 @@ fn handle_memory_high_event(monitored_process: &mut MonitoredProcess) -> HighMem
                     let mem_stats = read_cgroup_memory_stat(uid, target_pid);
                     let swap_kb = read_cgroup_memory_swap_kb(uid, target_pid);
                     log_total_memory_breach(uid as i32, target_cmd, &mem_stats, swap_kb);
-                    process.kill();
+                    process.kill::<P>();
                     record_kill_event(target_cmd);
                     return HighMemoryEventResult::KilledDueToInsufficientReclaim;
                 }
