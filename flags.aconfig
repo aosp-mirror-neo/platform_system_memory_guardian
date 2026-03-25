@@ -21,3 +21,10 @@ flag {
   description: "All pmgd to kill a process on memory.high events"
   bug: "434681786"
 }
+
+flag {
+  name: "heap_dump_enabled"
+  namespace: "system_performance"
+  description: "Allow pmgd to take heap dumps"
+  bug: "496121052"
+}

@@ -327,6 +327,10 @@ fn handle_memory_high_event<P: ProcessGroupApi>(
 }
 
 fn create_perfetto_trace(target_cmd: &str) -> io::Result<()> {
+    if !pmgd_flags::heap_dump_enabled() {
+        return Ok(());
+    }
+
     let trace_template = include_str!("../heap_dump.cfg");
 
     let random_msb: u32 = rand::thread_rng().gen();
