@@ -243,8 +243,6 @@ fn handle_memory_high_event<P: ProcessGroupApi>(
 
         log_threshold_exceeded(uid as i32, target_cmd, &mem_stats, swap_kb);
 
-        let _ = create_perfetto_trace(target_cmd);
-
         // LINT.IfChange
         if !pmgd_flags::process_kill_enabled() {
             // LINT.ThenChange(HighMemoryEventResult)
@@ -262,6 +260,8 @@ fn handle_memory_high_event<P: ProcessGroupApi>(
                 "killing pid_{} anon_memory {}mb > limit {}mb",
                 target_pid, anon_memory_in_mb, anon_limit_in_mb
             );
+
+            let _ = create_perfetto_trace(target_cmd);
             log_anon_memory_breach(uid as i32, target_cmd, &mem_stats, swap_kb);
             process.kill::<P>();
             record_kill_event(target_cmd);
@@ -283,6 +283,8 @@ fn handle_memory_high_event<P: ProcessGroupApi>(
 
             if mem_curr >= mem_high {
                 warn!("checking if mem_curr {}mb >= mem_high {}mb", mem_curr, mem_high);
+
+                let _ = create_perfetto_trace(target_cmd);
                 log_anon_memory_breach(uid as i32, target_cmd, &mem_stats, swap_kb);
                 process.kill::<P>();
                 record_kill_event(target_cmd);
@@ -309,6 +311,8 @@ fn handle_memory_high_event<P: ProcessGroupApi>(
                     );
                     let mem_stats = read_cgroup_memory_stat(uid, target_pid);
                     let swap_kb = read_cgroup_memory_swap_kb(uid, target_pid);
+
+                    let _ = create_perfetto_trace(target_cmd);
                     log_total_memory_breach(uid as i32, target_cmd, &mem_stats, swap_kb);
                     process.kill::<P>();
                     record_kill_event(target_cmd);
