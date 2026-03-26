@@ -50,11 +50,13 @@ use monitored_processes::MonitoredProcesses;
 mod memcg_proc_memory_util;
 use memcg_proc_memory_util::{
     read_cgroup_memory_current_kb, read_cgroup_memory_high_kb, read_cgroup_memory_stat,
-    read_cgroup_memory_swap_kb, read_memory_high,
+    read_cgroup_memory_swap_kb, read_memory_high, CgroupMemStat,
 };
 
 mod logging;
 use logging::{log_anon_memory_breach, log_threshold_exceeded, log_total_memory_breach};
+
+use statslog_rust::memcg_memory_process_kill_event::KillReason;
 
 mod utils;
 use utils::Process;
@@ -63,6 +65,8 @@ mod watcher;
 use watcher::Watcher;
 
 const HOLD_BACK_AFTER_SUCCESSFUL_RECLAIM_IN_SECONDS: u32 = 300;
+
+const WAIT_FOR_PERFETTO_INVOCATION_IN_SECONDS: u32 = 10;
 
 // Local error class that collects the different kinds of errors that might be reported.
 #[derive(Error, Debug)]
@@ -262,9 +266,14 @@ fn handle_memory_high_event<P: ProcessGroupApi>(
             );
 
             let _ = create_perfetto_trace(target_cmd);
-            log_anon_memory_breach(uid as i32, target_cmd, &mem_stats, swap_kb);
-            process.kill::<P>();
-            record_kill_event(target_cmd);
+            log_and_kill_process::<P>(
+                process,
+                target_cmd,
+                KillReason::AnonMemoryBreach,
+                uid,
+                &mem_stats,
+                swap_kb,
+            );
             return HighMemoryEventResult::KilledDueToHighAnonMemory;
         } else {
             let reclaim_time_secs = monitored_process.get_spec_reclaim_wait_time_secs();
@@ -285,9 +294,14 @@ fn handle_memory_high_event<P: ProcessGroupApi>(
                 warn!("checking if mem_curr {}mb >= mem_high {}mb", mem_curr, mem_high);
 
                 let _ = create_perfetto_trace(target_cmd);
-                log_anon_memory_breach(uid as i32, target_cmd, &mem_stats, swap_kb);
-                process.kill::<P>();
-                record_kill_event(target_cmd);
+                log_and_kill_process::<P>(
+                    process,
+                    target_cmd,
+                    KillReason::AnonMemoryBreach,
+                    uid,
+                    &mem_stats,
+                    swap_kb,
+                );
                 return HighMemoryEventResult::KilledDueToHighAnonMemory;
             } else {
                 info!("Waiting for memory reclaim for {} seconds", reclaim_time_secs);
@@ -313,9 +327,14 @@ fn handle_memory_high_event<P: ProcessGroupApi>(
                     let swap_kb = read_cgroup_memory_swap_kb(uid, target_pid);
 
                     let _ = create_perfetto_trace(target_cmd);
-                    log_total_memory_breach(uid as i32, target_cmd, &mem_stats, swap_kb);
-                    process.kill::<P>();
-                    record_kill_event(target_cmd);
+                    log_and_kill_process::<P>(
+                        process,
+                        target_cmd,
+                        KillReason::TotalMemcgMemoryBreach,
+                        uid,
+                        &mem_stats,
+                        swap_kb,
+                    );
                     return HighMemoryEventResult::KilledDueToInsufficientReclaim;
                 }
             }
@@ -327,6 +346,10 @@ fn handle_memory_high_event<P: ProcessGroupApi>(
 }
 
 fn create_perfetto_trace(target_cmd: &str) -> io::Result<()> {
+    if !pmgd_flags::heap_dump_enabled() {
+        return Ok(());
+    }
+
     let trace_template = include_str!("../heap_dump.cfg");
 
     let random_msb: u32 = rand::thread_rng().gen();
@@ -387,6 +410,32 @@ fn filter_valid_config_targets(config: &mut Configuration) {
         }
         !was_killed_since_reboot
     });
+}
+
+// Log memory breach and kill the process
+fn log_and_kill_process<P: ProcessGroupApi>(
+    process: &Process,
+    target_cmd: &str,
+    kill_reason: KillReason,
+    uid: u32,
+    mem_stats: &CgroupMemStat,
+    swap_kb: u32,
+) {
+    match kill_reason {
+        KillReason::AnonMemoryBreach => {
+            log_anon_memory_breach(uid as i32, target_cmd, mem_stats, swap_kb)
+        }
+        KillReason::TotalMemcgMemoryBreach => {
+            log_total_memory_breach(uid as i32, target_cmd, mem_stats, swap_kb)
+        }
+        unknown_reason => {
+            warn!("unsupported kill reason provided: {}", unknown_reason as i32);
+        }
+    }
+    // https://b.corp.google.com/issues/496121052#comment5
+    thread::sleep(Duration::from_secs(WAIT_FOR_PERFETTO_INVOCATION_IN_SECONDS.into()));
+    process.kill::<P>();
+    record_kill_event(target_cmd);
 }
 
 fn record_kill_event(process_name: &str) {

@@ -10,34 +10,34 @@ processes, taking action when memory usage exceeds configured limits.
 
 pmgd introduces a granular, per-process approach to memory enforcement. It
 allows defining specific memory ceilings for targeted processes and gracefully
-handling limit violations by collecting debugging information (like Perfetto
-heap dumps) prior to process termination. This targeted execution prevents
-misbehaving processes from destabilizing the system while providing actionable
-diagnostic data.
+handling limit violations by logging statsd memory atoms prior to process termination.
+This targeted execution prevents misbehaving processes from destabilizing the system.
 
 ## Execution Flow
 
-The daemon listens for memory pressure events (specifically high-memory activity
-via `memory.events`) using `inotify`. When a monitored process triggers a memory
-event, `pmgd` performs the following actions:
 
-1.  **Heap Dump Collection**: Triggers a Perfetto Java heap dump using the
-    configuration defined in `/vendor/etc/pmgd/heap_dump.cfg`.
 
-2.  **Memory Enforcement (Kill Policy)**:
+The daemon uses `inotify` to listen for memory pressure events (specifically
+high-memory activity using `memory.events`). When a monitored process triggers a
+memory event, `pmgd` performs the following actions:
 
-    *   **High Anonymous Memory**: If the anonymous memory of the process
-        exceeds the configured `anon_limit_in_mb`, the process is killed
-        immediately.
+1.  **Anonymous memory check:** Evaluates the process's anonymous memory. If it
+    exceeds the configured `anon_limit_in_mb`, `pmgd` kills the process
+    immediately
+2.  **Reclaim wait period:** If the anonymous memory is under the specified
+    anonymous memory limit, `pmgd` waits for a system reclaim grace
+    period (`reclaim_wait_time_secs`).
+3.  **Memory evaluation after reclaim:** If the target process's `memory.current`
+    remains greater than or equal to `memory.high` after the grace period, *or*
+    anonymous memory exceeds `anon_limit_in_mb`, `pmgd` kills the
+    process immediately
 
-    *   **Insufficient Reclaim**: If anonymous memory is within bounds, `pmgd`
-        waits for a specific reclaim period (`reclaim_wait_time_secs`). If the
-        process's `memory.current` remains greater than or equal to
-        `memory.high` after this grace period, it is killed.
+This evaluation cycle triggers on subsequent memory events until the process is killed or reclaim reduces its memory usage below the specified limits.
 
-3.  **Reboot Rate Limiting**: To prevent boot loops or persistent crashes,
-    `pmgd` tracks process kills in `/data/misc/pmgd/history.json`. Processes are
-    restricted to one `pmgd`-initiated kill per device reboot.
+### System health features
+*  **Reboot rate limiting:** To prevent boot loops or persistent crashes,
+    `pmgd` tracks process kills in `/data/misc/pmgd/history.json`. The daemon
+    restricts processes to a single `pmgd`-initiated kill per device reboot.
 
 ## Configuration
 
@@ -68,7 +68,39 @@ defined by the following fields:
     additional task profiles that should be applied to the process when
     monitoring starts.
 
-Example profile (`/vendor/etc/pmgd/config.json`):
+The following is an example configuration:
+
+The cgroup task profile in `vendor/etc/task_profiles.json`:
+```json
+{
+  "Attributes": [
+    ...
+    {
+      "Name": "MemHigh",
+      "Controller": "memory",
+      "File": "memory.high"
+    }
+  ],
+  "Profiles": [
+    {
+      "Name": "SystemServerMemoryHighLimit",
+      "Actions": [
+        {
+          "Name": "SetAttribute",
+          "Params":
+          {
+            "Name": "MemHigh",
+            "Value": "1080M"
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+
+The pmgd config `vendor/etc/pmgd/config.json`:
 
 ```json
 {
